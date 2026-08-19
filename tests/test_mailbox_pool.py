@@ -162,3 +162,8 @@ def test_proxy_mgr_none_uses_direct_and_stops(monkeypatch):
 
     assert made == 2
     assert proxies_used == [None, None]
+
+
+def test_max_per_ip_zero_raises_assertion_error():
+    with pytest.raises(AssertionError):
+        MailboxPool(FakeProxyMgr(), count=3, max_per_ip=0)

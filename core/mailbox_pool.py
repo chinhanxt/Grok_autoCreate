@@ -46,6 +46,7 @@ class MailboxPool:
         max_per_ip: int = 4,
         stopped: Optional[Callable[[], bool]] = None,
     ):
+        assert max_per_ip >= 1, f"max_per_ip must be >= 1 (got {max_per_ip})"
         self._proxy_mgr = proxy_mgr
         self.count = count
         self.spacing = spacing
