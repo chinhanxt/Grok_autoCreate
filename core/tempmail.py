@@ -19,6 +19,15 @@ logger = logging.getLogger("xai_tempmail")
 
 BASE_URL = "https://web2.temp-mail.org"
 
+RATE_LIMIT_MAX_ATTEMPTS = 4  # initial request + 3 retries, then raise
+NETWORK_MAX_ATTEMPTS = 2  # initial request + 1 retry, then raise
+RATE_LIMIT_DEFAULT_DELAY = 30.0
+NETWORK_RETRY_DELAY = 0.5
+
+
+class TempMailRateLimitError(RuntimeError):
+    """Raised when temp-mail.org keeps returning HTTP 429 after all retries."""
+
 DEFAULT_HEADERS = {
     "accept": "*/*",
     "accept-language": "en-US,en;q=0.7",
@@ -53,6 +62,21 @@ def extract_otp_from_text(text: str) -> Optional[str]:
     return None
 
 
+def _retry_after_delay(resp) -> float:
+    """Seconds to wait from the Retry-After header, or 30.0 if absent/unparseable."""
+    headers = getattr(resp, "headers", None) or {}
+    items = getattr(headers, "items", None)
+    if items is None:
+        return RATE_LIMIT_DEFAULT_DELAY
+    for key, value in items():
+        if key.lower() == "retry-after":
+            try:
+                return max(0.0, float(str(value).strip()))
+            except (TypeError, ValueError):
+                break
+    return RATE_LIMIT_DEFAULT_DELAY
+
+
 class TempMailClient:
     """
     Temp-Mail.org client matching /home/chinhan/Downloads/temp_mail_gui.py.
@@ -74,11 +98,9 @@ class TempMailClient:
         self.headers["authorization"] = self.token
 
     def _request(self, method: str, url: str, data: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        attempts = [True, False] if self.proxies else [False, False]
         last_err = None
 
-        for idx, use_proxy in enumerate(attempts):
-            curr_proxies = self.proxies if use_proxy else None
+        for attempt in range(RATE_LIMIT_MAX_ATTEMPTS):
             try:
                 if USE_CFFI:
                     resp = requests.request(
@@ -86,7 +108,7 @@ class TempMailClient:
                         url,
                         headers=self.headers,
                         json=data if data else None,
-                        proxies=curr_proxies,
+                        proxies=self.proxies,
                         impersonate="chrome",
                         timeout=20,
                     )
@@ -96,23 +118,35 @@ class TempMailClient:
                         url,
                         headers=self.headers,
                         json=data if data else None,
-                        proxies=curr_proxies,
+                        proxies=self.proxies,
                         timeout=20,
                     )
-                try:
-                    res_json = resp.json()
-                    if resp.status_code == 200:
-                        return res_json
-                    elif resp.status_code == 429:
-                        last_err = f"HTTP 429: {resp.text[:200]}"
-                        time.sleep(1.0)
-                        continue
-                    return res_json
-                except Exception:
-                    last_err = f"HTTP {resp.status_code}: {resp.text[:300]}"
             except Exception as e:
                 last_err = str(e)
-                time.sleep(0.5)
+                if attempt + 1 >= NETWORK_MAX_ATTEMPTS:
+                    break
+                time.sleep(NETWORK_RETRY_DELAY)
+                continue
+
+            if resp.status_code == 429:
+                last_err = f"HTTP 429: {resp.text[:200]}"
+                if attempt + 1 >= RATE_LIMIT_MAX_ATTEMPTS:
+                    raise TempMailRateLimitError(
+                        f"Temp-Mail rate limited (HTTP 429: {resp.text[:200]})"
+                    )
+                time.sleep(_retry_after_delay(resp))
+                continue
+
+            try:
+                res_json = resp.json()
+            except Exception:
+                last_err = f"HTTP {resp.status_code}: {resp.text[:300]}"
+                if attempt + 1 >= NETWORK_MAX_ATTEMPTS:
+                    break
+                time.sleep(NETWORK_RETRY_DELAY)
+                continue
+
+            return res_json
 
         raise RuntimeError(f"Lỗi kết nối Temp-Mail ({last_err})")
 
