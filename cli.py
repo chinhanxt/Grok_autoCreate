@@ -20,6 +20,7 @@ from rich import print as rprint
 from core.engine import StealthEngine
 from core.auth import AccountCreator
 from core.tempmail import TempMailClient
+from core.mailbox_pool import MailboxPool, MailboxEntry
 from core.exporter import AccountRecord, save_account, load_accounts
 from core.tor_proxy import TorProxyManager
 from core.proxyxoay import ProxyXoayManager
@@ -50,7 +51,8 @@ def create_single_account(
     headless: bool = True,
     json_path: str = DEFAULT_JSON_OUTPUT,
     txt_path: str = DEFAULT_TXT_OUTPUT,
-    index: int = 1
+    index: int = 1,
+    mailbox: Optional[MailboxEntry] = None,
 ) -> Optional[AccountRecord]:
     """
     Executes registration for a single account.
@@ -61,9 +63,20 @@ def create_single_account(
     if use_tempmail:
         with console.status("[bold cyan]Creating temporary email inbox (mail.gw / mail.tm)...", spinner="dots"):
             try:
-                tempmail_client = TempMailClient(proxy=proxy)
-                temp_email, _ = tempmail_client.create_inbox()
-                email = temp_email
+                if mailbox is not None:
+                    tempmail_client = TempMailClient(proxy=mailbox.proxy)
+                    tempmail_client.set_token(mailbox.token)
+                    email = mailbox.email
+                else:
+                    pool = MailboxPool(proxy_mgr=None, count=1)
+                    pool.prepare()
+                    mailbox = pool.acquire(timeout=0)
+                    if mailbox is None:
+                        console.print("[red]✘ Failed to create tempmail:[/red] không đủ hòm thư Temp-Mail")
+                        return None
+                    tempmail_client = TempMailClient(proxy=mailbox.proxy)
+                    tempmail_client.set_token(mailbox.token)
+                    email = mailbox.email
                 console.print(f"[green]✔[/green] Generated TempMail: [bold yellow]{email}[/bold yellow]")
             except Exception as e:
                 console.print(f"[red]✘ Failed to create tempmail:[/red] {e}")
@@ -234,8 +247,30 @@ def main():
     num_threads = min(max(1, args.threads), 10)
     if num_threads > 1 and args.count > 1:
         console.print(f"[bold green]⚡ High-Speed Multi-Threading Mode: {num_threads} Concurrent Threads active![/bold green]")
+
+        # Pre-create a Temp-Mail mailbox pool (serialized) before firing threads
+        pool: Optional[MailboxPool] = None
+        if args.tempmail:
+            with console.status(f"[bold cyan]Đang tạo hòm thư Temp-Mail #1/{args.count} (serialized)...", spinner="dots"):
+                pool = MailboxPool(proxy_mgr=proxyxoay_mgr, count=args.count, stopped=None)
+                made = pool.prepare()
+            if made < args.count:
+                console.print(
+                    f"[yellow]⚠ Cảnh báo: Chỉ tạo được {made}/{args.count} hòm thư Temp-Mail. "
+                    f"Các tài khoản vượt quá số hòm thư sẽ thất bại với 'không đủ hòm thư Temp-Mail' "
+                    f"thay vì spam 429.[/yellow]"
+                )
+            else:
+                console.print(f"[green]✔ Đã tạo xong {made}/{args.count} hòm thư Temp-Mail (serialized).[/green]")
+
         from concurrent.futures import ThreadPoolExecutor
         def worker(idx):
+            mailbox = None
+            if pool is not None:
+                mailbox = pool.acquire(timeout=0)
+                if mailbox is None:
+                    console.print(f"[red]✘ [#{idx+1}/{args.count}] Thất bại: không đủ hòm thư Temp-Mail.[/red]")
+                    return None
             return create_single_account(
                 email=args.email,
                 password=args.password,
@@ -246,7 +281,8 @@ def main():
                 headless=not args.headful,
                 json_path=args.output_json,
                 txt_path=args.output_txt,
-                index=idx+1
+                index=idx+1,
+                mailbox=mailbox
             )
         with ThreadPoolExecutor(max_workers=num_threads) as executor:
             list(executor.map(worker, range(args.count)))
