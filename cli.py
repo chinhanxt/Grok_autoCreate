@@ -68,7 +68,7 @@ def create_single_account(
                     tempmail_client.set_token(mailbox.token)
                     email = mailbox.email
                 else:
-                    pool = MailboxPool(proxy_mgr=None, count=1)
+                    pool = MailboxPool(proxy_mgr=None, count=1, initial_proxy=proxy)
                     pool.prepare()
                     mailbox = pool.acquire(timeout=0)
                     if mailbox is None:
@@ -252,7 +252,7 @@ def main():
         pool: Optional[MailboxPool] = None
         if args.tempmail:
             with console.status(f"[bold cyan]Đang tạo hòm thư Temp-Mail #1/{args.count} (serialized)...", spinner="dots"):
-                pool = MailboxPool(proxy_mgr=proxyxoay_mgr, count=args.count, stopped=None)
+                pool = MailboxPool(proxy_mgr=proxyxoay_mgr, count=args.count, stopped=None, initial_proxy=active_proxy)
                 made = pool.prepare()
             if made < args.count:
                 console.print(

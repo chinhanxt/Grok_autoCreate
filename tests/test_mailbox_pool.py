@@ -181,6 +181,39 @@ def test_proxy_mgr_none_uses_direct_and_stops(monkeypatch):
     assert proxies_used == [None, None]
 
 
+def test_proxy_mgr_none_with_initial_proxy_uses_proxy_without_rotation(monkeypatch):
+    record_sleeps(monkeypatch)
+    proxies_used = []
+    fake_create_inbox(monkeypatch, proxies_used=proxies_used)
+
+    pool = MailboxPool(None, count=10, spacing=1.0, max_per_ip=2, initial_proxy="http://p:8080")
+    made = pool.prepare()
+
+    assert made == 10
+    assert proxies_used == ["http://p:8080"] * 10
+    entries = [pool.acquire(timeout=0) for _ in range(10)]
+    assert [e.proxy for e in entries] == ["http://p:8080"] * 10
+
+
+def test_initial_proxy_seeds_proxy_mgr_current_proxy(monkeypatch):
+    record_sleeps(monkeypatch)
+    proxies_used = []
+    fake_create_inbox(monkeypatch, proxies_used=proxies_used)
+    proxy_mgr = FakeProxyMgr(
+        initial_proxy="http://ip-a:8080",
+        rotate_result=(True, "http://ip-b:8080", {"status": 100}),
+    )
+
+    pool = MailboxPool(proxy_mgr, count=5, spacing=1.0, max_per_ip=4, initial_proxy="http://seed:8080")
+    made = pool.prepare()
+
+    assert made == 5
+    assert proxy_mgr.get_proxy_calls == 0
+    assert len(proxy_mgr.rotate_calls) == 1
+    entries = [pool.acquire(timeout=0) for _ in range(5)]
+    assert [e.proxy for e in entries] == ["http://seed:8080"] * 4 + ["http://ip-b:8080"]
+
+
 def test_max_per_ip_zero_raises_assertion_error():
     with pytest.raises(AssertionError):
         MailboxPool(FakeProxyMgr(), count=3, max_per_ip=0)

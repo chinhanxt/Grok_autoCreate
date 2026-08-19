@@ -4,8 +4,10 @@ Serialized Temp-Mail mailbox pool.
 Pre-creates `count` mailboxes one at a time (never concurrently), caps the
 number of mailboxes per proxy IP (`max_per_ip`), rotates to a fresh proxy IP
 via `proxy_mgr.rotate_to_new_ip()` when the cap is reached, and handles
-`TempMailRateLimitError` by rotating + retrying. Consumers take mailboxes in
-FIFO order with `acquire()` and hand them back with `release()`.
+`TempMailRateLimitError` by rotating + retrying. When no `proxy_mgr` is given
+but a fixed `initial_proxy` is, all mailboxes are created through that proxy
+(no rotation, so no IP leaks). Consumers take mailboxes in FIFO order with
+`acquire()` and hand them back with `release()`.
 """
 import queue
 import time
@@ -34,8 +36,14 @@ class MailboxPool:
     """
     FIFO pool of pre-created temp-mail inboxes.
 
-    `proxy_mgr` may be None (direct connection, no proxy). When it is None,
-    `current_proxy` stays None and proxy rotation is a no-op (returns failure).
+    `proxy_mgr` may be None. When it is None:
+      - `initial_proxy` provided: all mailboxes are created through
+        `initial_proxy` (no rotation — rotation requires a proxy_mgr).
+      - `initial_proxy` None: direct connection, `current_proxy` stays None
+        and proxy rotation is a no-op (returns failure).
+    When `proxy_mgr` is not None, `current_proxy` is seeded from
+    `initial_proxy` if provided, else from `proxy_mgr.get_proxy()`, and
+    rotation works as usual.
     """
 
     def __init__(
@@ -45,9 +53,11 @@ class MailboxPool:
         spacing: float = 12,
         max_per_ip: int = 4,
         stopped: Optional[Callable[[], bool]] = None,
+        initial_proxy: Optional[str] = None,
     ):
         assert max_per_ip >= 1, f"max_per_ip must be >= 1 (got {max_per_ip})"
         self._proxy_mgr = proxy_mgr
+        self._initial_proxy = initial_proxy
         self.count = count
         self.spacing = spacing
         self.max_per_ip = max_per_ip
@@ -70,13 +80,25 @@ class MailboxPool:
                 break
 
             if self._made_on_current_ip >= self.max_per_ip:
-                if not self._rotate_with_retry():
+                if self._proxy_mgr is None:
+                    if self._initial_proxy is None:
+                        logger.error(
+                            f"Could not rotate proxy after {ROTATE_MAX_ATTEMPTS} attempts; "
+                            f"stopping pre-create ({made}/{self.count} created)"
+                        )
+                        break
+                    logger.info(
+                        f"No proxy manager (fixed proxy); continuing through {self._initial_proxy}"
+                    )
+                    self._made_on_current_ip = 0
+                elif not self._rotate_with_retry():
                     logger.error(
                         f"Could not rotate proxy after {ROTATE_MAX_ATTEMPTS} attempts; "
                         f"stopping pre-create ({made}/{self.count} created)"
                     )
                     break
-                continue
+                else:
+                    continue
 
             entry = self._create_mailbox()
             if entry is None:
@@ -117,7 +139,12 @@ class MailboxPool:
 
     def _resolve_initial_proxy(self) -> Optional[str]:
         if self._proxy_mgr is None:
-            return None
+            if self._initial_proxy:
+                logger.info(f"MailboxPool using proxy: {self._initial_proxy}")
+            return self._initial_proxy
+        if self._initial_proxy:
+            logger.info(f"MailboxPool using proxy: {self._initial_proxy}")
+            return self._initial_proxy
         try:
             ok, proxy_url, data = self._proxy_mgr.get_proxy()
         except Exception as e:

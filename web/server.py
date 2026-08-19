@@ -345,6 +345,7 @@ def _run_account_creation_worker(task_id: str, req: SignupRequest):
             proxy_mgr=proxyxoay_mgr,
             count=total_count,
             stopped=lambda: sess.get("stopped", False),
+            initial_proxy=active_proxy,
         )
         made = pool.prepare()
         if made < total_count:
