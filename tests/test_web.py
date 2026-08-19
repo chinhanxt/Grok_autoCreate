@@ -174,3 +174,49 @@ def test_partial_shortfall_excess_thread_records_failure(monkeypatch):
     assert sess["success_count"] == 2
     assert sess["failed_count"] == 1
     assert sess["status"] == "success"
+
+
+class _InlinePool:
+    def __init__(self, **kwargs):
+        self.kwargs = kwargs
+        self.entries = [MailboxEntry(email="inline@tempmail.org", token="t-inline", proxy=None)]
+
+    def prepare(self):
+        return len(self.entries)
+
+    def acquire(self, timeout=None):
+        return self.entries.pop(0) if self.entries else None
+
+
+def test_single_thread_tempmail_uses_inline_pool_no_precreate(monkeypatch):
+    """For a single-thread web tempmail run, no mailbox pool is pre-created;
+    the inline path creates exactly one MailboxPool(count=1)."""
+    created = []
+
+    def _recording_pool(**kwargs):
+        created.append(kwargs)
+        return _InlinePool(**kwargs)
+
+    monkeypatch.setattr("web.server.MailboxPool", _recording_pool)
+    monkeypatch.setattr("web.server.StealthEngine", _FakeEngine)
+    monkeypatch.setattr("web.server.AccountCreator", _FakeCreator)
+    monkeypatch.setattr("web.server.TempMailClient", _FakeTempMail)
+    monkeypatch.setattr("web.server.save_account", lambda *a, **k: None)
+    req = SignupRequest(
+        use_tempmail=True,
+        count=1,
+        threads=1,
+        proxy_mode="rotating",
+        rotating_proxy_key=None,
+    )
+    sess = _make_session(count=1)
+    SESSIONS["test-task"] = sess
+    try:
+        _run_account_creation_worker("test-task", req)
+    finally:
+        SESSIONS.pop("test-task", None)
+
+    assert len(created) == 1
+    assert created[0]["count"] == 1
+    assert sess["success_count"] == 1
+    assert sess["status"] == "success"

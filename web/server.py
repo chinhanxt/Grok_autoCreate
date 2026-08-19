@@ -337,9 +337,12 @@ def _run_account_creation_worker(task_id: str, req: SignupRequest):
         sess["logs"].append(f"Chế độ ĐA LUỒNG: Chạy đồng thời {num_threads} luồng song song.")
     sess["logs"].append(f"Bắt đầu tiến trình tạo {total_count} tài khoản Grok / x.ai...")
 
-    # Pre-create a Temp-Mail mailbox pool (serialized) before firing threads
+    # Pre-create a Temp-Mail mailbox pool (serialized) before firing threads.
+    # Only worth it for multi-thread runs; single-thread web tempmail creates
+    # inline via a MailboxPool(count=1) inside _create_single_account so it
+    # stays consistent (serialized) instead of recreating concurrently.
     pool = None
-    if req.use_tempmail and total_count > 0 and not sess.get("stopped", False):
+    if num_threads > 1 and req.use_tempmail and total_count > 0 and not sess.get("stopped", False):
         sess["logs"].append(f"Đang tạo hòm thư Temp-Mail #1/{total_count} (serialized)...")
         pool = MailboxPool(
             proxy_mgr=proxyxoay_mgr,
@@ -422,8 +425,19 @@ def _run_account_creation_worker(task_id: str, req: SignupRequest):
                 with lock:
                     sess["logs"].append(f"{prefix_tag} Đang tạo hòm thư Temp-Mail tự động...")
                 if tempmail_client is None:
-                    tempmail_client = TempMailClient(proxy=thread_proxy)
-                    email, _ = tempmail_client.create_inbox()
+                    inline_pool = MailboxPool(
+                        proxy_mgr=proxyxoay_mgr,
+                        count=1,
+                        stopped=lambda: sess.get("stopped", False),
+                        initial_proxy=thread_proxy,
+                    )
+                    inline_pool.prepare()
+                    mbox = inline_pool.acquire(timeout=0)
+                    if mbox is None:
+                        raise RuntimeError("không đủ hòm thư Temp-Mail.")
+                    tempmail_client = TempMailClient(proxy=mbox.proxy)
+                    tempmail_client.set_token(mbox.token)
+                    email = mbox.email
                 with lock:
                     sess["email"] = email
                     sess["logs"].append(f"{prefix_tag} Email: {email} ({tempmail_client.provider})")
@@ -476,8 +490,9 @@ def _run_account_creation_worker(task_id: str, req: SignupRequest):
                         sess["logs"].append(f"{prefix_tag} Thất bại: {err_msg}")
                         if total_count == 1:
                             sess["error"] = err_msg
-                    if pool is not None and mailbox is not None:
-                        pool.release(mailbox)
+                    # Do NOT release `mailbox` back to the pool: its email was
+                    # already used in a signup attempt, so a later thread could
+                    # re-acquire it and hit "email already registered" cascades.
             finally:
                 engine.close()
 

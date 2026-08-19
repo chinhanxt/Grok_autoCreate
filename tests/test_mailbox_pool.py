@@ -1,5 +1,7 @@
+import threading
+import time as time_module
 import pytest
-from core.mailbox_pool import MailboxPool, MailboxEntry
+from core.mailbox_pool import MailboxPool, MailboxEntry, MAILBOX_CREATE_LOCK, MAX_CONSECUTIVE_CREATE_FAILURES
 from core.tempmail import TempMailClient, TempMailRateLimitError
 
 
@@ -36,6 +38,25 @@ def fake_create_inbox(monkeypatch, proxies_used=None, fail_first_n=0):
         state["n"] += 1
         if call_no < fail_first_n:
             raise TempMailRateLimitError("Temp-Mail rate limited (HTTP 429)")
+        return (f"user{call_no}@tempmail.org", f"token-{call_no}")
+
+    monkeypatch.setattr(TempMailClient, "create_inbox", fake_create)
+    return proxies_used
+
+
+def fake_create_inbox_sequence(monkeypatch, exceptions, proxies_used=None):
+    """Monkeypatch TempMailClient.create_inbox; each entry in `exceptions` is
+    raised for the corresponding call (in order); once exhausted, creation
+    succeeds."""
+    state = {"n": 0}
+    proxies_used = proxies_used if proxies_used is not None else []
+
+    def fake_create(self):
+        proxies_used.append(self.proxy)
+        call_no = state["n"]
+        state["n"] += 1
+        if call_no < len(exceptions):
+            raise exceptions[call_no]
         return (f"user{call_no}@tempmail.org", f"token-{call_no}")
 
     monkeypatch.setattr(TempMailClient, "create_inbox", fake_create)
@@ -214,6 +235,113 @@ def test_initial_proxy_seeds_proxy_mgr_current_proxy(monkeypatch):
     assert [e.proxy for e in entries] == ["http://seed:8080"] * 4 + ["http://ip-b:8080"]
 
 
-def test_max_per_ip_zero_raises_assertion_error():
-    with pytest.raises(AssertionError):
+def test_max_per_ip_zero_raises_value_error():
+    with pytest.raises(ValueError):
         MailboxPool(FakeProxyMgr(), count=3, max_per_ip=0)
+
+
+def test_non_rate_limit_failure_retries_with_rotation(monkeypatch):
+    """A generic (non-429) failure such as a 403 Cloudflare block is treated as
+    retryable-with-rotation: bounded retries each rotate to a fresh proxy."""
+    record_sleeps(monkeypatch)
+    proxies_used = []
+    fake_create_inbox_sequence(monkeypatch, [RuntimeError("HTTP 403 blocked")], proxies_used)
+    proxy_mgr = FakeProxyMgr(
+        initial_proxy="http://ip-a:8080",
+        rotate_result=(True, "http://ip-b:8080", {"status": 100}),
+    )
+
+    pool = MailboxPool(proxy_mgr, count=1, spacing=1.0, max_per_ip=4)
+    made = pool.prepare()
+
+    assert made == 1
+    assert proxies_used == ["http://ip-a:8080", "http://ip-b:8080"]
+    assert len(proxy_mgr.rotate_calls) == 1
+    entry = pool.acquire()
+    assert entry.email == "user1@tempmail.org"
+    assert entry.proxy == "http://ip-b:8080"
+
+
+def test_non_rate_limit_failure_gives_up_after_bounded_retries(monkeypatch):
+    """Persistent non-429 failures exhaust the bounded retries and return None
+    for that mailbox (rotation still attempted each retry)."""
+    record_sleeps(monkeypatch)
+    proxies_used = []
+    fake_create_inbox_sequence(monkeypatch, [RuntimeError("boom")] * 9, proxies_used)
+    proxy_mgr = FakeProxyMgr(rotate_result=(True, "http://ip-b:8080", {"status": 100}))
+
+    pool = MailboxPool(proxy_mgr, count=100, spacing=0.0, max_per_ip=10)
+    made = pool.prepare()
+
+    assert made == 0
+    assert pool._queue.qsize() == 0
+    assert pool._consecutive_failures == MAX_CONSECUTIVE_CREATE_FAILURES
+    # 3 failed mailboxes * RATE_LIMIT_MAX_ATTEMPTS create attempts each.
+    assert len(proxies_used) == 9
+
+
+def test_prepare_continues_after_failed_mailbox(monkeypatch):
+    """A single failed mailbox must not discard the remaining ones: pre-create
+    keeps going and still covers the full count."""
+    record_sleeps(monkeypatch)
+    fake_create_inbox_sequence(
+        monkeypatch,
+        [RuntimeError("boom"), RuntimeError("boom"), RuntimeError("boom")],
+    )
+    proxy_mgr = FakeProxyMgr(rotate_result=(True, "http://ip-b:8080", {"status": 100}))
+
+    pool = MailboxPool(proxy_mgr, count=2, spacing=1.0, max_per_ip=4)
+    made = pool.prepare()
+
+    assert made == 2
+    assert pool._queue.qsize() == 2
+    assert pool._consecutive_failures == 0
+
+
+def test_prepare_stops_after_bounded_consecutive_failures(monkeypatch):
+    """After MAX_CONSECUTIVE_CREATE_FAILURES consecutive failures prepare()
+    stops instead of looping forever."""
+    record_sleeps(monkeypatch)
+    fake_create_inbox_sequence(monkeypatch, [RuntimeError("boom")] * 9)
+    proxy_mgr = FakeProxyMgr(rotate_result=(True, "http://ip-b:8080", {"status": 100}))
+
+    pool = MailboxPool(proxy_mgr, count=100, spacing=0.0, max_per_ip=10)
+    made = pool.prepare()
+
+    assert made == 0
+    assert pool._queue.qsize() == 0
+    assert pool._consecutive_failures == MAX_CONSECUTIVE_CREATE_FAILURES
+
+
+def test_global_create_lock_serializes_across_pools(monkeypatch):
+    """Two pools prepared concurrently on separate threads must never create
+    mailboxes at the same instant (module-level MAILBOX_CREATE_LOCK)."""
+    active = {"n": 0, "max": 0}
+    guard = threading.Lock()
+
+    def fake_create(self):
+        with guard:
+            active["n"] += 1
+            active["max"] = max(active["max"], active["n"])
+        time_module.sleep(0.01)
+        with guard:
+            active["n"] -= 1
+        return ("user@tempmail.org", "token")
+
+    monkeypatch.setattr(TempMailClient, "create_inbox", fake_create)
+    monkeypatch.setattr("core.mailbox_pool.time.sleep", lambda s: None)
+
+    results = []
+
+    def run():
+        pool = MailboxPool(FakeProxyMgr(), count=2, spacing=0.0, max_per_ip=10)
+        results.append(pool.prepare())
+
+    threads = [threading.Thread(target=run) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert results == [2, 2]
+    assert active["max"] == 1

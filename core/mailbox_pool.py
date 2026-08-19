@@ -10,6 +10,7 @@ but a fixed `initial_proxy` is, all mailboxes are created through that proxy
 `acquire()` and hand them back with `release()`.
 """
 import queue
+import threading
 import time
 import logging
 from dataclasses import dataclass
@@ -19,10 +20,16 @@ from core.tempmail import TempMailClient, TempMailRateLimitError
 
 logger = logging.getLogger("xai_mailbox_pool")
 
+# Global serialization of mailbox creation: every MailboxPool instance (across
+# all tasks/pools) shares this one lock so two concurrent pools never create
+# mailboxes in parallel against the same exit IP.
+MAILBOX_CREATE_LOCK = threading.Lock()
+
 ROTATE_TIMEOUT_SEC = 90  # rotate_to_new_ip deadline; proxyxoay cooldowns are 37-58s
 ROTATE_MAX_ATTEMPTS = 3  # bounded retries before giving up on rotation
 RATE_LIMIT_MAX_ATTEMPTS = 3  # initial create + retries before giving up on a mailbox
 RATE_LIMIT_FALLBACK_SLEEP = 30.0  # wait when rotation fails and we must retry on same proxy
+MAX_CONSECUTIVE_CREATE_FAILURES = 3  # bounded consecutive failures before prepare() gives up
 
 
 @dataclass
@@ -55,7 +62,8 @@ class MailboxPool:
         stopped: Optional[Callable[[], bool]] = None,
         initial_proxy: Optional[str] = None,
     ):
-        assert max_per_ip >= 1, f"max_per_ip must be >= 1 (got {max_per_ip})"
+        if max_per_ip < 1:
+            raise ValueError(f"max_per_ip must be >= 1 (got {max_per_ip})")
         self._proxy_mgr = proxy_mgr
         self._initial_proxy = initial_proxy
         self.count = count
@@ -65,6 +73,7 @@ class MailboxPool:
         self._queue: "queue.Queue[MailboxEntry]" = queue.Queue()
         self._current_proxy: Optional[str] = None
         self._made_on_current_ip = 0
+        self._consecutive_failures = 0
 
     def prepare(self) -> int:
         """Pre-create up to `count` mailboxes serially; returns how many were made."""
@@ -75,6 +84,9 @@ class MailboxPool:
         self._current_proxy = self._resolve_initial_proxy()
 
         while made < self.count:
+            # stopped() is checked at the top of every iteration, so it is
+            # honored before any rotation below and again right after rotation
+            # returns (via `continue` back to this check).
             if self._is_stopped():
                 logger.info(f"MailboxPool stopped early; {made}/{self.count} created")
                 break
@@ -100,11 +112,29 @@ class MailboxPool:
                 else:
                     continue
 
-            entry = self._create_mailbox()
+            # Serialize mailbox creation across all pools/tasks: two concurrent
+            # web tasks against the same exit IP must never create in parallel.
+            with MAILBOX_CREATE_LOCK:
+                entry = self._create_mailbox()
             if entry is None:
-                logger.error(f"Mailbox creation failed; stopping pre-create ({made}/{self.count} created)")
-                break
+                if self._is_stopped():
+                    break
+                self._consecutive_failures += 1
+                logger.error(
+                    f"Mailbox creation failed ({self._consecutive_failures}/"
+                    f"{MAX_CONSECUTIVE_CREATE_FAILURES} consecutive); {made}/{self.count} created"
+                )
+                if self._consecutive_failures >= MAX_CONSECUTIVE_CREATE_FAILURES:
+                    logger.error(
+                        f"Stopping pre-create after {MAX_CONSECUTIVE_CREATE_FAILURES} "
+                        f"consecutive mailbox failures ({made}/{self.count} created)"
+                    )
+                    break
+                # A transient failure must not discard the remaining mailboxes;
+                # the shortfall is reported by the caller via made < count.
+                continue
 
+            self._consecutive_failures = 0
             self._queue.put(entry)
             made += 1
             self._made_on_current_ip += 1
@@ -183,10 +213,26 @@ class MailboxPool:
                 time.sleep(self.spacing)
         return False
 
+    def _rotate_or_wait_fallback(self) -> bool:
+        """Rotate to a fresh proxy for a retry. On rotation failure, waits the
+        fallback sleep and retries on the same proxy — unless stopped, in which
+        case False is returned so the caller gives up."""
+        if self._rotate_current_proxy():
+            return True
+        logger.warning("Rotation failed; waiting and retrying on same proxy")
+        if self._is_stopped():
+            return False
+        time.sleep(RATE_LIMIT_FALLBACK_SLEEP)
+        return True
+
     def _create_mailbox(self) -> Optional[MailboxEntry]:
         """
         Create one mailbox, retrying the same logical creation (bounded) on
-        TempMailRateLimitError: rotate proxy first, else wait and retry once more.
+        TempMailRateLimitError and on other transient failures (403/Cloudflare
+        block, expired tokens, network blips): rotate to a fresh proxy first,
+        else wait and retry on the same proxy. Gives up after
+        RATE_LIMIT_MAX_ATTEMPTS attempts and returns None (prepare() decides
+        whether to keep pre-creating).
         """
         for attempt in range(1, RATE_LIMIT_MAX_ATTEMPTS + 1):
             try:
@@ -201,13 +247,20 @@ class MailboxPool:
                 logger.warning(
                     f"Rate limited (attempt {attempt}/{RATE_LIMIT_MAX_ATTEMPTS}): {e}; rotating proxy"
                 )
-                if self._rotate_current_proxy():
-                    continue
-                logger.warning("Rotation failed; waiting and retrying on same proxy")
-                time.sleep(RATE_LIMIT_FALLBACK_SLEEP)
+                if not self._rotate_or_wait_fallback():
+                    return None
             except Exception as e:
-                logger.error(f"Mailbox creation failed: {e}")
-                return None
+                if attempt >= RATE_LIMIT_MAX_ATTEMPTS:
+                    logger.error(
+                        f"Mailbox creation failed after {attempt} attempts; giving up on this mailbox"
+                    )
+                    return None
+                logger.warning(
+                    f"Mailbox creation failed (attempt {attempt}/{RATE_LIMIT_MAX_ATTEMPTS}): "
+                    f"{e}; rotating proxy"
+                )
+                if not self._rotate_or_wait_fallback():
+                    return None
         return None
 
     def _is_stopped(self) -> bool:
