@@ -1,0 +1,314 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Grok & x.ai</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Geist+Mono:wght@400;500;600;700&family=Geist:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="dashboard">
+    <!-- Navbar / Status Bar -->
+    <header class="dashboard-nav">
+      <div class="nav-left">
+        <div class="brand">
+          <span class="brand-title">Grok & x.ai</span>
+        </div>
+        <div class="nav-divider"></div>
+        <div class="status-indicator" id="systemStatus">
+          <span class="status-dot"></span>
+          <span class="status-label" id="statusLabel">CHỜ LỆNH</span>
+        </div>
+      </div>
+
+      <div class="nav-right">
+        <span class="metric-pill" id="accountCountBadge">0 TÀI KHOẢN</span>
+        <button class="btn btn-ghost btn-sm" onclick="loadAccounts()">LÀM MỚI</button>
+      </div>
+    </header>
+
+    <!-- Dashboard Content Area (Full screen grid) -->
+    <main class="dashboard-grid">
+      <!-- Left Column: Controls (Top) + Console (Bottom) -->
+      <div class="grid-left">
+        <!-- Control Card -->
+        <section class="panel control-panel">
+          <div class="panel-header">
+            <span class="panel-title">CẤU HÌNH</span>
+          </div>
+
+          <div class="panel-body">
+            <!-- Count Field -->
+            <div class="form-field">
+              <div class="field-header">
+                <label for="loopCount">SỐ LƯỢNG TẠO</label>
+              </div>
+              <div class="input-stepper-group">
+                <input type="number" id="loopCount" class="input-text" value="1" min="1" max="10000" placeholder="Nhập số lượng (vd: 50)" oninput="updateLoopBadge()">
+                <div class="pill-group">
+                  <button type="button" class="pill-btn" onclick="setCount(1)">1</button>
+                  <button type="button" class="pill-btn" onclick="setCount(5)">5</button>
+                  <button type="button" class="pill-btn" onclick="setCount(10)">10</button>
+                  <button type="button" class="pill-btn" onclick="setCount(50)">50</button>
+                  <button type="button" class="pill-btn" onclick="setCount(100)">100</button>
+                </div>
+              </div>
+            <!-- Concurrency Threads Field -->
+            <div class="form-field">
+              <div class="field-header">
+                <label for="threadCount">SỐ LUỒNG SONG SONG</label>
+                <span class="badge" id="threadSpeedBadge" style="background: rgba(34, 197, 94, 0.15); color: #22c55e; border: 1px solid rgba(34, 197, 94, 0.3);">x3 Tốc độ</span>
+              </div>
+              <select id="threadCount" class="input-text tor-mini-select" onchange="updateThreadBadge()" style="width: 100%; height: 38px; cursor: pointer;">
+                <option value="1">1 Luồng (Tuần tự - Tiết kiệm RAM)</option>
+                <option value="2">2 Luồng Song Song (x2 Tốc độ)</option>
+                <option value="3" selected>3 Luồng Song Song (x3 - Khuyên Dùng)</option>
+                <option value="5">5 Luồng Song Song (x5 - Siêu Tốc)</option>
+              </select>
+            </div>
+
+            <!-- Random Name Toggle -->
+            <div class="form-field checkbox-field">
+              <label class="checkbox-label">
+                <input type="checkbox" id="randomNameCheckbox" checked onchange="toggleNameInputs()">
+                <span class="checkbox-box"></span>
+                <span class="checkbox-text">Tên ngẫu nhiên (User_XX)</span>
+              </label>
+            </div>
+
+            <!-- Custom Name Inputs (Hidden by default) -->
+            <div id="customNameRow" class="form-row" style="display: none;">
+              <div class="form-field col">
+                <label for="firstName">HỌ & ĐỆM</label>
+                <input type="text" id="firstName" class="input-text" placeholder="Nguyễn">
+              </div>
+              <div class="form-field col">
+                <label for="lastName">TÊN</label>
+                <input type="text" id="lastName" class="input-text" placeholder="Văn A">
+              </div>
+            </div>
+
+            <!-- Password -->
+            <div class="form-field">
+              <label for="password">MẬT KHẨU</label>
+              <input type="text" id="password" class="input-text" value="taikhoanAI123">
+            </div>
+
+            <!-- TorProxy Toggle & Settings -->
+            <div class="form-field checkbox-field">
+              <label class="checkbox-label">
+                <input type="checkbox" id="useTorCheckbox" onchange="toggleTorSettings()">
+                <span class="checkbox-box"></span>
+                <span class="checkbox-text">TorProxy</span>
+              </label>
+            </div>
+
+            <!-- Tor Status & Ports Card -->
+            <div id="torConfigRow" class="tor-card" style="display: none;">
+              <div class="tor-card-header">
+                <div class="tor-status-group">
+                  <div class="tor-indicator" id="torStatusBadge">
+                    <span class="tor-dot"></span>
+                    <span class="tor-conn-label">SOCKS5</span>
+                  </div>
+                  <div class="tor-ip-box">
+                    <span class="tor-ip-label">Exit IP</span>
+                    <span class="tor-ip-val" id="torIpText">Đang tải...</span>
+                    <span class="tor-loc-val" id="torLocText"></span>
+                  </div>
+                </div>
+                <button type="button" class="btn-tor-rotate" id="btnRotateIp" onclick="testOrRotateTorIp()" title="Đổi IP ngẫu nhiên ngay lập tức">
+                  <svg class="tor-rotate-svg" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"/>
+                  </svg>
+                  <span>ĐỔI IP</span>
+                </button>
+              </div>
+              <div class="tor-card-footer">
+                <div class="tor-port-field">
+                  <label for="torSocksPort">SOCKS PORT</label>
+                  <input type="number" id="torSocksPort" class="tor-mini-input" value="9050" onchange="checkTorStatus()">
+                </div>
+                <div class="tor-port-field">
+                  <label for="torControlPort">CONTROL PORT</label>
+                  <input type="number" id="torControlPort" class="tor-mini-input" value="9051">
+                </div>
+              </div>
+            </div>
+
+            <!-- Proxy Dân Cư (ProxyXoay) Toggle & Settings -->
+            <div class="form-field checkbox-field">
+              <label class="checkbox-label">
+                <input type="checkbox" id="useRotatingProxyCheckbox" checked onchange="toggleRotatingProxySettings()">
+                <span class="checkbox-box"></span>
+                <span class="checkbox-text">Proxy Dân Cư (ProxyXoay Xoay IP)</span>
+              </label>
+            </div>
+
+            <!-- Proxy Dân Cư Card -->
+            <div id="rotatingProxyConfigRow" class="tor-card proxyxoay-card">
+              <!-- Top Row: Status, IP Info & Rotate Button -->
+              <div class="tor-card-header">
+                <div class="tor-status-group">
+                  <div class="tor-indicator" id="rotatingProxyBadge">
+                    <span class="tor-dot"></span>
+                    <span class="tor-conn-label" id="rotatingProxyBadgeText">DÂN CƯ</span>
+                  </div>
+                  <div class="tor-ip-box">
+                    <span class="tor-ip-label">IP Dân Cư Hiện Tại</span>
+                    <span class="tor-ip-val" id="rotatingProxyIpText">Đang kết nối...</span>
+                    <span class="tor-loc-val" id="rotatingProxyLocText"></span>
+                  </div>
+                </div>
+                <button type="button" class="btn-tor-rotate" id="btnRotateProxyXoay" onclick="testOrRotateProxyXoay()" title="Xoay sang IP dân cư mới">
+                  <svg class="tor-rotate-svg" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"/>
+                  </svg>
+                  <span>XOAY IP</span>
+                </button>
+              </div>
+
+              <!-- Middle: API Key -->
+              <div class="proxyxoay-key-row">
+                <label for="rotatingProxyKey">KEY PROXYXOAY</label>
+                <input type="text" id="rotatingProxyKey" class="tor-mini-input" value="HVnSXrEVXRSrUYBkwYzuId" placeholder="Nhập key xoay" onchange="checkRotatingProxyStatus()">
+              </div>
+
+              <!-- Bottom: Telco & Location & Whitelist -->
+              <div class="tor-card-footer proxyxoay-options-grid">
+                <div class="tor-port-field">
+                  <label for="rotatingProxyNhamang">NHÀ MẠNG</label>
+                  <select id="rotatingProxyNhamang" class="tor-mini-select" onchange="checkRotatingProxyStatus()">
+                    <option value="random" selected>Random (Tất cả)</option>
+                    <option value="viettel">Viettel</option>
+                    <option value="vnpt">VNPT</option>
+                    <option value="fpt">FPT</option>
+                  </select>
+                </div>
+                <div class="tor-port-field">
+                  <label for="rotatingProxyTinhthanh">TỈNH THÀNH</label>
+                  <select id="rotatingProxyTinhthanh" class="tor-mini-select" onchange="checkRotatingProxyStatus()">
+                    <option value="0" selected>0 - Random</option>
+                    <option value="1">1 - Hà Nội</option>
+                    <option value="2">2 - TP. Hồ Chí Minh</option>
+                    <option value="3">3 - Đà Nẵng</option>
+                  </select>
+                </div>
+              </div>
+            </div>
+
+            <!-- Progress Bar (Visible during execution) -->
+            <div id="progressContainer" class="progress-wrap" style="display: none;">
+              <div class="progress-info">
+                <span id="progressStatus">0/1</span>
+                <span id="progressPercent">0%</span>
+              </div>
+              <div class="progress-track">
+                <div id="progressBar" class="progress-bar" style="width: 0%;"></div>
+              </div>
+            </div>
+
+            <!-- Action Buttons -->
+            <div class="action-buttons">
+              <button id="btnCreateAccount" class="btn btn-primary btn-block" onclick="startCreation()">
+                <span id="btnCreateText">BẮT ĐẦU</span>
+              </button>
+              <button id="btnStopAccount" class="btn btn-danger btn-block" style="display: none;" onclick="stopCreation()">
+                <span>DỪNG</span>
+              </button>
+            </div>
+          </div>
+        </section>
+
+        <!-- Console Panel -->
+        <section class="panel console-panel">
+          <div class="panel-header">
+            <div class="header-left">
+              <span class="panel-title">NHẬT KÝ</span>
+              <span class="log-count-pill" id="logCounter">0</span>
+            </div>
+            <button class="btn btn-ghost btn-xs" onclick="clearLogs()">XÓA LOG</button>
+          </div>
+          <div class="console-body" id="consoleLogs">
+            <div class="log-row sys"><span class="log-ts">--:--:--</span><span class="log-tag">HỆ THỐNG</span><span class="log-msg">Sẵn sàng thực hiện.</span></div>
+          </div>
+        </section>
+      </div>
+
+      <!-- Right Column: Accounts Table -->
+      <section class="panel accounts-panel">
+        <div class="panel-header table-panel-header">
+          <div class="header-left header-filter-group">
+            <span class="panel-title">DANH SÁCH TÀI KHOẢN</span>
+            <input type="text" id="searchInput" class="search-input" placeholder="Tìm email..." oninput="onFilterChange()">
+            <select id="tokenFilterSelect" class="tor-mini-select table-filter-select" onchange="onFilterChange()">
+              <option value="all" selected>Tất cả tài khoản</option>
+              <option value="oauth">Có OAuth Token</option>
+              <option value="sso">Chỉ SSO Cookie</option>
+            </select>
+          </div>
+          <div class="header-right table-actions-group">
+            <div id="selectionStatusWrap" class="selection-status-wrap" style="display: none;">
+              <span class="selection-pill" id="selectedCountText">Đã chọn 0 mục</span>
+              <button class="btn btn-danger btn-xs" id="btnBatchDelete" onclick="deleteSelectedAccounts()">XÓA ĐÃ CHỌN</button>
+            </div>
+            <div class="export-btn-group">
+              <button class="btn btn-ghost btn-xs" onclick="exportData('oauth')" title="Xuất OAuth token (Nếu chọn thì xuất mục đã chọn, không thì xuất tất cả)">XUẤT OAUTH JSON</button>
+              <button class="btn btn-ghost btn-xs" onclick="exportData('txt')">XUẤT TXT</button>
+              <button class="btn btn-ghost btn-xs" onclick="exportData('json')">XUẤT JSON</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="panel-body no-pad table-wrap">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th class="th-checkbox">
+                  <input type="checkbox" id="selectAllCheckbox" onchange="toggleSelectAll(this)" title="Chọn tất cả trang này">
+                </th>
+                <th>EMAIL</th>
+                <th>MẬT KHẨU</th>
+                <th>TRẠNG THÁI TOKEN</th>
+                <th class="th-actions">THAO TÁC</th>
+              </tr>
+            </thead>
+            <tbody id="accountsTableBody">
+              <tr>
+                <td colspan="5" class="empty-cell">Chưa có tài khoản nào</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <!-- Pagination Footer -->
+        <div class="pagination-footer" id="paginationFooter">
+          <div class="pagination-info" id="paginationInfo">Hiển thị 0 - 0 / 0 tài khoản</div>
+          <div class="pagination-controls" id="paginationControls">
+            <!-- Dynamic page buttons: 1 2 3 4... -->
+          </div>
+          <div class="pagination-size">
+            <label for="perPageSelect">HIỂN THỊ:</label>
+            <select id="perPageSelect" class="per-page-select" onchange="changePerPage(this.value)">
+              <option value="5">5 / trang</option>
+              <option value="10" selected>10 / trang</option>
+              <option value="25">25 / trang</option>
+              <option value="50">50 / trang</option>
+              <option value="100">100 / trang</option>
+              <option value="9999">Tất cả</option>
+            </select>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <!-- Toast Notifications -->
+    <div id="toastContainer" class="toast-container"></div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
