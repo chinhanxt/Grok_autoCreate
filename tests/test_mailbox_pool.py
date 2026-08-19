@@ -87,6 +87,23 @@ def test_acquire_fifo_order(monkeypatch):
     assert emails == ["user0@tempmail.org", "user1@tempmail.org", "user2@tempmail.org"]
 
 
+def test_acquire_timeout_zero_returns_none_on_empty_pool():
+    pool = MailboxPool(None, count=0)
+    assert pool.acquire(timeout=0) is None
+
+
+def test_acquire_timeout_zero_returns_entry_when_available(monkeypatch):
+    record_sleeps(monkeypatch)
+    fake_create_inbox(monkeypatch)
+
+    pool = MailboxPool(FakeProxyMgr(), count=1, spacing=1.0, max_per_ip=10)
+    pool.prepare()
+
+    entry = pool.acquire(timeout=0)
+    assert isinstance(entry, MailboxEntry)
+    assert pool.acquire(timeout=0) is None
+
+
 def test_release_returns_mailbox_to_pool(monkeypatch):
     record_sleeps(monkeypatch)
     fake_create_inbox(monkeypatch)

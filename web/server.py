@@ -350,16 +350,9 @@ def _run_account_creation_worker(task_id: str, req: SignupRequest):
         if made < total_count:
             sess["logs"].append(
                 f"⚠️ Cảnh báo: Chỉ tạo được {made}/{total_count} hòm thư Temp-Mail. "
-                f"Các tài khoản còn lại sẽ thất bại với 'không đủ hòm thư' thay vì spam 429."
+                f"Các tài khoản vượt quá số hòm thư sẽ thất bại với 'không đủ hòm thư Temp-Mail' "
+                f"thay vì spam 429."
             )
-            total_count = made
-            sess["total_count"] = made
-            if total_count <= 0:
-                sess["status"] = "failed"
-                sess["stage"] = "error"
-                sess["error"] = "Không đủ hòm thư Temp-Mail."
-                sess["logs"].append("Kết thúc: Không có hòm thư Temp-Mail để tạo tài khoản.")
-                return
 
     def _create_single_account(i: int):
         if sess.get("stopped"):
@@ -392,7 +385,7 @@ def _run_account_creation_worker(task_id: str, req: SignupRequest):
         tempmail_client = None
         email = None
         if pool is not None:
-            mailbox = pool.acquire()
+            mailbox = pool.acquire(timeout=0)
             if mailbox is None:
                 with lock:
                     sess["failed_count"] += 1

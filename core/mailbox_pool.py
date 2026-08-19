@@ -93,12 +93,23 @@ class MailboxPool:
         logger.info(f"MailboxPool pre-created {made}/{self.count} mailboxes")
         return made
 
-    def acquire(self) -> Optional[MailboxEntry]:
+    def acquire(self, timeout: Optional[float] = None) -> Optional[MailboxEntry]:
         """
-        Blocking FIFO take. Blocks until a mailbox is available; returns None
-        only if the pool is closed/empty (no close() is currently provided).
+        FIFO take.
+
+        `timeout=None` (default) blocks until a mailbox is available — the
+        original blocking behavior. A float timeout waits up to that many
+        seconds and returns None if the pool is still empty (e.g.
+        `acquire(timeout=0)` is a non-blocking take that returns None
+        immediately on an empty pool). Consumers must treat a None result as
+        "pool exhausted" and fail cleanly.
         """
-        return self._queue.get()
+        if timeout is None:
+            return self._queue.get()
+        try:
+            return self._queue.get(timeout=timeout)
+        except queue.Empty:
+            return None
 
     def release(self, entry: MailboxEntry) -> None:
         """Return a mailbox to the pool for reuse."""
