@@ -171,3 +171,54 @@ class ProxyXoayManager:
         # Other error statuses
         else:
             return False, None, data
+
+    def rotate_to_new_ip(self, timeout_sec: int = 30) -> Tuple[bool, Optional[str], Dict[str, Any]]:
+        """
+        Blocks until proxyxoay returns a genuinely rotated IP (status 100),
+        waiting out cooldowns (status 101/102) in between.
+
+        The whole loop is bounded by `timeout_sec` wall-clock seconds. Returns
+        (True, proxy_url, data) once status 100 arrives, otherwise
+        (False, None, last_data) when the budget runs out.
+        """
+        deadline = time.time() + timeout_sec
+        last_data: Dict[str, Any] = {}
+
+        while True:
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                break
+
+            try:
+                ok, proxy_url, data = self.get_proxy(force_rotate=True, timeout_sec=10)
+            except Exception as e:
+                logger.error(f"ProxyXoay rotate_to_new_ip error: {e}")
+                last_data = {"error": str(e)}
+                time.sleep(min(1.0, remaining))
+                continue
+
+            last_data = data or {}
+            status = last_data.get("status") if isinstance(last_data, dict) else None
+
+            if ok and status == 100:
+                return True, proxy_url, last_data
+
+            if status in (101, 102):
+                try:
+                    wait_seconds = int(last_data.get("wait_seconds") or 0)
+                except (TypeError, ValueError):
+                    wait_seconds = 0
+                if wait_seconds <= 0:
+                    time.sleep(min(1.0, remaining))
+                    continue
+                if wait_seconds >= remaining:
+                    time.sleep(remaining)
+                    return False, None, last_data
+                time.sleep(wait_seconds)
+                continue
+
+            # Other/unknown status or a failed call: back off briefly and retry
+            # within the remaining budget.
+            time.sleep(min(1.0, remaining))
+
+        return False, None, last_data
