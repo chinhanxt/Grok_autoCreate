@@ -140,8 +140,8 @@ class ProxyXoayManager:
             self._save_cache()
             return True, self.last_proxy_http, data
 
-        # Status 101 / 102: Cooldown (Proxy is still alive on port, wait before rotating to next IP)
-        elif status in (101, 102):
+        # Status 101: Cooldown (Proxy is still alive on port, wait before rotating to next IP)
+        elif status == 101 or (status == 100 and "chờ" in message.lower()):
             wait_sec = 0
             m = re.search(r"(\d+)s", message)
             if m:
@@ -168,9 +168,13 @@ class ProxyXoayManager:
 
             return False, None, data
 
-        # Other error statuses
+        # Status 102 / Other: Key expired or invalid
         else:
-            return False, None, data
+            return False, None, {
+                "status": status,
+                "message": message,
+                "error": f"ProxyXoay báo lỗi: {message or status}"
+            }
 
     def rotate_to_new_ip(self, timeout_sec: int = 30) -> Tuple[bool, Optional[str], Dict[str, Any]]:
         """

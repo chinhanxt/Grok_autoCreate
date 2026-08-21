@@ -5,6 +5,7 @@ Faithfully restored and optimized from /home/chinhan/Downloads/temp_mail_gui.py.
 import time
 import json
 import logging
+import random
 import re
 from typing import Optional, Tuple, Dict, Any
 
@@ -17,11 +18,14 @@ except ImportError:
 
 logger = logging.getLogger("xai_tempmail")
 
+import threading
+_inbox_creation_lock = threading.Lock()
+
 BASE_URL = "https://web2.temp-mail.org"
 
-RATE_LIMIT_MAX_ATTEMPTS = 4  # initial request + 3 retries, then raise
-NETWORK_MAX_ATTEMPTS = 2  # initial request + 1 retry, then raise
-RATE_LIMIT_DEFAULT_DELAY = 30.0
+RATE_LIMIT_MAX_ATTEMPTS = 6  # initial request + 5 retries
+NETWORK_MAX_ATTEMPTS = 3  # initial request + 2 retries
+RATE_LIMIT_DEFAULT_DELAY = 1.5
 NETWORK_RETRY_DELAY = 0.5
 
 
@@ -63,7 +67,7 @@ def extract_otp_from_text(text: str) -> Optional[str]:
 
 
 def _retry_after_delay(resp) -> float:
-    """Seconds to wait from the Retry-After header, or 30.0 if absent/unparseable."""
+    """Seconds to wait from the Retry-After header, or default delay if absent/unparseable."""
     headers = getattr(resp, "headers", None) or {}
     items = getattr(headers, "items", None)
     if items is None:
@@ -71,7 +75,8 @@ def _retry_after_delay(resp) -> float:
     for key, value in items():
         if key.lower() == "retry-after":
             try:
-                return max(0.0, float(str(value).strip()))
+                val = float(str(value).strip())
+                return max(0.5, min(val, 5.0))
             except (TypeError, ValueError):
                 break
     return RATE_LIMIT_DEFAULT_DELAY
@@ -82,20 +87,48 @@ class TempMailClient:
     Temp-Mail.org client matching /home/chinhan/Downloads/temp_mail_gui.py.
     """
 
-    def __init__(self, proxy: Optional[str] = None):
+    def __init__(self, proxy: Optional[str] = None, max_retry_delay: Optional[float] = None):
         self.headers = dict(DEFAULT_HEADERS)
         self.token: Optional[str] = None
         self.mailbox: Optional[str] = None
         self.email: Optional[str] = None
-        self.proxy = proxy
-        self.proxies = {"http": proxy, "https": proxy} if proxy else None
+        self.raw_proxy = proxy
+        self.proxy = self._format_isolated_proxy(proxy)
+        self.proxies = {"http": self.proxy, "https": self.proxy} if self.proxy else None
+        self.max_retry_delay = max_retry_delay
         self.provider = "temp-mail.org"
 
-    def set_token(self, token: str):
+    def _format_isolated_proxy(self, proxy: Optional[str]) -> Optional[str]:
+        """Injects SOCKS5 stream isolation credentials if connecting via Tor."""
+        if not proxy:
+            return None
+        import random
+        if ("127.0.0.1:9050" in proxy or "localhost:9050" in proxy) and "@" not in proxy:
+            rnd = random.randint(10000, 99999)
+            return f"socks5://tor_w_{rnd}:pwd_{rnd}@127.0.0.1:9050"
+        return proxy
+
+    def rotate_tor_stream(self):
+        """Rotates the Tor circuit by generating a new stream isolation user ID."""
+        import random
+        if self.raw_proxy and ("127.0.0.1:9050" in self.raw_proxy or "localhost:9050" in self.raw_proxy):
+            rnd = random.randint(10000, 99999)
+            self.proxy = f"socks5://tor_w_{rnd}:pwd_{rnd}@127.0.0.1:9050"
+            self.proxies = {"http": self.proxy, "https": self.proxy}
+
+    def set_proxy(self, proxy: Optional[str]):
+        """Updates the proxy configuration for requests."""
+        self.raw_proxy = proxy
+        self.proxy = self._format_isolated_proxy(proxy)
+        self.proxies = {"http": self.proxy, "https": self.proxy} if self.proxy else None
+
+    def set_token(self, token: str, email: Optional[str] = None):
         if not token.startswith("Bearer "):
             token = f"Bearer {token}"
         self.token = token
         self.headers["authorization"] = self.token
+        if email:
+            self.email = email
 
     def _request(self, method: str, url: str, data: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         last_err = None
@@ -130,57 +163,175 @@ class TempMailClient:
 
             if resp.status_code == 429:
                 last_err = f"HTTP 429: {resp.text[:200]}"
+                # If using Tor, switch to a fresh exit circuit immediately
+                self.rotate_tor_stream()
+                
+                delay = _retry_after_delay(resp) + (attempt * 0.5)
                 if attempt + 1 >= RATE_LIMIT_MAX_ATTEMPTS:
                     raise TempMailRateLimitError(
                         f"Temp-Mail rate limited (HTTP 429: {resp.text[:200]})"
                     )
-                time.sleep(_retry_after_delay(resp))
+                logger.warning(f"Temp-Mail rate limited (HTTP 429). Retrying in {delay:.1f}s...")
+                time.sleep(delay)
                 continue
 
-            try:
-                res_json = resp.json()
-            except Exception:
-                last_err = f"HTTP {resp.status_code}: {resp.text[:300]}"
+            if resp.status_code == 403 and self.proxies:
+                logger.info("Proxy blocked by Cloudflare on Temp-Mail; falling back to direct connection...")
+                self.proxies = None
+                continue
+
+            if resp.status_code != 200:
+                last_err = f"HTTP {resp.status_code}: {resp.text[:200]}"
                 if attempt + 1 >= NETWORK_MAX_ATTEMPTS:
                     break
                 time.sleep(NETWORK_RETRY_DELAY)
                 continue
 
-            return res_json
+            try:
+                return resp.json()
+            except Exception as e:
+                last_err = f"JSON decode error: {e}"
+                if attempt + 1 >= NETWORK_MAX_ATTEMPTS:
+                    break
+                time.sleep(NETWORK_RETRY_DELAY)
+                continue
 
         raise RuntimeError(f"Lỗi kết nối Temp-Mail ({last_err})")
 
+    def _create_mail_tm_inbox(self) -> Tuple[str, str]:
+        """Fallback to api.mail.tm when temp-mail.org is rate limited."""
+        import string
+        import requests as std_requests
+
+        try:
+            # 1. Get active domain
+            dom_resp = std_requests.get("https://api.mail.tm/domains", timeout=10)
+            dom_data = dom_resp.json()
+            members = dom_data.get("hydra:member", [])
+            if not members:
+                raise RuntimeError("Không tìm thấy domain khả dụng trên Mail.tm")
+            domain = members[0]["domain"]
+
+            # 2. Create account
+            rand_user = "xai_" + "".join(random.choices(string.ascii_lowercase + string.digits, k=8))
+            email = f"{rand_user}@{domain}"
+            pwd = "PasswordAI123!"
+
+            std_requests.post(
+                "https://api.mail.tm/accounts",
+                json={"address": email, "password": pwd},
+                timeout=10
+            )
+
+            # 3. Get JWT token
+            tok_resp = std_requests.post(
+                "https://api.mail.tm/token",
+                json={"address": email, "password": pwd},
+                timeout=10
+            )
+            tok_data = tok_resp.json()
+            token = tok_data.get("token")
+            if not token:
+                raise RuntimeError(f"Lỗi lấy token Mail.tm: {tok_data}")
+
+            self.provider = "mail.tm"
+            self.email = email
+            self.set_token(token, email=email)
+            logger.info(f"Created fallback mail.tm inbox: {self.email}")
+            return self.email, self.token
+        except Exception as e:
+            logger.error(f"Mail.tm fallback error: {e}")
+            raise
+
     def create_mailbox(self) -> Dict[str, Any]:
-        res = self._request("POST", f"{BASE_URL}/mailbox")
-        if "token" in res:
-            self.set_token(res["token"])
-            self.mailbox = res.get("mailbox")
-            self.email = self.mailbox
-            logger.info(f"Created temp-mail.org inbox: {self.email}")
-            return res
-        raise ValueError(f"Failed to create mailbox: {res}")
+        """
+        Creates a new mailbox on web2.temp-mail.org and returns the raw response dictionary.
+        """
+        global _inbox_creation_lock
+        with _inbox_creation_lock:
+            # Stagger mailbox creations slightly to avoid burst rate limits
+            time.sleep(0.3)
+            data = self._request("POST", f"{BASE_URL}/mailbox")
+        self.token = data.get("token")
+        if not self.token:
+            raise RuntimeError(f"Invalid mailbox response: {data}")
+        self.provider = "temp-mail.org"
+        self.set_token(self.token)
+        self.mailbox = data.get("mailbox")
+        self.email = self.mailbox
+        logger.info(f"Created temp-mail.org inbox: {self.email}")
+        return data
 
     def create_inbox(self) -> Tuple[str, str]:
-        res = self.create_mailbox()
-        return self.email, self.token
+        """
+        Creates a new mailbox on web2.temp-mail.org or falls back seamlessly to mail.tm.
+        """
+        try:
+            self.create_mailbox()
+            return self.email, self.token
+        except Exception as e:
+            logger.warning(f"Temp-mail.org rate limited/error ({e}). Seamlessly switching to Mail.tm...")
+            return self._create_mail_tm_inbox()
 
     def get_messages(self) -> Dict[str, Any]:
+        """
+        Fetches all received emails for the current mailbox token.
+        """
+        if not self.token:
+            raise ValueError("No mailbox token found. Call create_inbox() or set_token() first.")
+
+        if self.provider == "mail.tm":
+            import requests as std_requests
+            headers = {"Authorization": self.token}
+            try:
+                resp = std_requests.get("https://api.mail.tm/messages", headers=headers, timeout=10)
+                if resp.status_code == 200:
+                    members = resp.json().get("hydra:member", [])
+                    return {"messages": [{"_id": m["id"], "subject": m.get("subject", ""), "intro": m.get("intro", "")} for m in members]}
+            except Exception:
+                pass
+            return {"messages": []}
+
         return self._request("GET", f"{BASE_URL}/messages")
 
     def get_message_detail(self, message_id: str) -> Dict[str, Any]:
+        """
+        Fetches details / body text for a specific email message.
+        """
+        if not self.token:
+            raise ValueError("No mailbox token found. Call create_inbox() or set_token() first.")
+
+        if self.provider == "mail.tm":
+            import requests as std_requests
+            headers = {"Authorization": self.token}
+            try:
+                resp = std_requests.get(f"https://api.mail.tm/messages/{message_id}", headers=headers, timeout=10)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    html_content = data.get("html", "")
+                    if isinstance(html_content, list):
+                        html_content = html_content[0] if html_content else ""
+                    return {
+                        "bodyText": (data.get("text", "") or "") + " " + (data.get("intro", "") or ""),
+                        "bodyHtml": html_content
+                    }
+            except Exception:
+                pass
+            return {}
+
         return self._request("GET", f"{BASE_URL}/messages/{message_id}")
 
     def fetch_otp_code(
         self,
         timeout_sec: int = 120,
-        poll_interval: float = 3.0,
+        poll_interval: float = 0.8,
         page: Optional[Any] = None
     ) -> Optional[str]:
         """
         Polls web2.temp-mail.org/messages for OTP code matching temp_mail_gui logic.
         """
-        if not self.email or not self.token:
-            raise ValueError("Mailbox not created. Call create_inbox() first.")
+        if not self.token:
+            raise ValueError("Mailbox token not set. Call set_token() or create_inbox() first.")
 
         start_time = time.time()
         resend_attempted = False

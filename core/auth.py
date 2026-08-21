@@ -52,7 +52,19 @@ class AccountCreator:
         self.page = self.engine.start()
 
         logger.info(f"Navigating to {XAI_SIGNUP_URL}...")
-        self.page.goto(XAI_SIGNUP_URL, wait_until="domcontentloaded")
+        for nav_try in range(3):
+            try:
+                self.page.goto(XAI_SIGNUP_URL, wait_until="domcontentloaded", timeout=25000)
+                break
+            except Exception as e:
+                err_str = str(e)
+                if "NS_ERROR_NET_RESET" in err_str or "ERR_CONNECTION_RESET" in err_str or "timeout" in err_str.lower():
+                    logger.warning(f"Navigation retry {nav_try+1}/3 due to connection reset: {e}")
+                    if nav_try == 2:
+                        raise RuntimeError(f"Lỗi kết nối mạng/proxy khi tải x.ai ({err_str[:100]})")
+                    time.sleep(1.0 + nav_try * 1.0)
+                else:
+                    raise
 
         # 1. Solve Cloudflare Turnstile if present
         self.engine.wait_for_cloudflare(timeout_sec=15)
@@ -101,18 +113,17 @@ class AccountCreator:
                         signup_btn.evaluate("el => el.click()")
             except Exception:
                 pass
-            time.sleep(0.8)
+            time.sleep(0.2)
 
         if not email_input:
             email_input = self.page.wait_for_selector(email_selector, timeout=8000)
 
         # 4. Fill Email (Direct fill & safe focus)
         try:
-            email_input.click(timeout=1500, force=True)
+            email_input.click(timeout=1000, force=True)
         except Exception:
             pass
         email_input.fill(email)
-        time.sleep(0.3)
 
         # 5. Click Sign up submit button
         submit_btn = self.page.wait_for_selector(
@@ -120,15 +131,13 @@ class AccountCreator:
             timeout=8000
         )
         try:
-            submit_btn.click(timeout=2000, force=True)
+            submit_btn.click(timeout=1500, force=True)
         except Exception:
             submit_btn.evaluate("el => el.click()")
         logger.info(f"Submitted email {email}. Waiting for OTP dispatch...")
-        time.sleep(0.8)
 
         # Check for immediate errors (e.g. invalid email or rate limit)
         try:
-            time.sleep(1.0)
             error_loc = self.page.locator('[data-slot="error"], .text-destructive, [role="alert"]')
             if error_loc.count() > 0 and error_loc.first.is_visible():
                 err_msg = error_loc.first.inner_text().strip()
@@ -148,43 +157,132 @@ class AccountCreator:
         """
         code = str(code).strip().replace("-", "").replace(" ", "")
         logger.info(f"Submitting 6-digit OTP: {code}")
-        time.sleep(0.8)
 
-        # 1. Target single OTP input (data-input-otp or name=code) or 6 separate inputs
-        otp_single = self.page.locator('input[data-input-otp="true"], input[name="code"], input[autocomplete="one-time-code"]')
-        if otp_single.count() > 0 and otp_single.first.is_visible():
-            try:
-                otp_single.first.click(timeout=1500, force=True)
-            except Exception:
-                pass
-            otp_single.first.fill(code)
-        else:
-            digit_inputs = self.page.locator('input[maxlength="1"], input[data-index], input[type="tel"]')
-            if digit_inputs.count() == 6:
-                for i, digit in enumerate(code):
-                    digit_inputs.nth(i).fill(digit)
-                    time.sleep(0.05)
-            else:
-                fallback_inp = self.page.locator('input[placeholder*="code" i], input[type="text"]').first
+        # 0. Dismiss any cookie banners / OneTrust overlays if present
+        try:
+            cookie_accept = self.page.locator('#onetrust-accept-btn-handler, #onetrust-reject-all-handler, button:has-text("Accept all"), button:has-text("Accept")')
+            if cookie_accept.count() > 0 and cookie_accept.first.is_visible():
+                cookie_accept.first.click(timeout=1000, force=True)
+                time.sleep(0.2)
+        except Exception:
+            pass
+
+        # 1. Wait up to 10s for the real OTP input element to appear
+        try:
+            self.page.wait_for_selector(
+                'input[data-input-otp="true"], input[autocomplete="one-time-code"], input[name="code"], input[placeholder*="code" i], input[maxlength="1"]',
+                timeout=10000
+            )
+        except Exception:
+            pass
+
+        time.sleep(0.2)
+
+        # 2. Try input-otp (single input with data-input-otp, name=code, autocomplete=one-time-code)
+        otp_single = self.page.locator('input[data-input-otp="true"], input[name="code"], input[autocomplete="one-time-code"], input[placeholder*="code" i]:not(#vendor-search-handler)')
+        filled = False
+
+        if otp_single.count() > 0:
+            for idx in range(otp_single.count()):
+                loc = otp_single.nth(idx)
                 try:
-                    fallback_inp.click(timeout=1500, force=True)
+                    inp_id = loc.get_attribute("id") or ""
+                    inp_name = loc.get_attribute("name") or ""
+                    if "vendor" in inp_id or "vendor" in inp_name:
+                        continue
+                    
+                    loc.click(timeout=1500, force=True)
+                    loc.fill("")
+                    self.page.keyboard.type(code, delay=50)
+                    filled = True
+                    break
+                except Exception:
+                    try:
+                        loc.fill(code, timeout=3000)
+                        filled = True
+                        break
+                    except Exception:
+                        pass
+
+        if not filled:
+            # 3. Try 6 separate digit slots
+            digit_inputs = self.page.locator('input[maxlength="1"]:not(#vendor-search-handler), input[data-index]:not(#vendor-search-handler), input[type="tel"]:not(#vendor-search-handler)')
+            if digit_inputs.count() >= 6:
+                try:
+                    digit_inputs.first.click(timeout=1500, force=True)
+                    self.page.keyboard.type(code, delay=50)
+                    filled = True
+                except Exception:
+                    for i, digit in enumerate(code):
+                        try:
+                            digit_inputs.nth(i).fill(digit, timeout=2000)
+                        except Exception:
+                            pass
+                    filled = True
+
+        if not filled:
+            # 4. Safe visible fallback (strictly excluding vendor-search-handler and search inputs)
+            visible_inputs = self.page.locator('input:visible:not(#vendor-search-handler):not([name="vendor-search-handler"]):not([aria-label*="search" i]):not([type="hidden"])')
+            for idx in range(visible_inputs.count()):
+                loc = visible_inputs.nth(idx)
+                try:
+                    inp_id = loc.get_attribute("id") or ""
+                    inp_name = loc.get_attribute("name") or ""
+                    if "vendor" in inp_id or "vendor" in inp_name:
+                        continue
+                    loc.click(timeout=1500, force=True)
+                    self.page.keyboard.type(code, delay=50)
+                    filled = True
+                    break
                 except Exception:
                     pass
-                fallback_inp.fill(code)
 
-        time.sleep(1.2)
+        # 5. Backup JS event dispatch
+        try:
+            self.page.evaluate("""(code) => {
+                const el = document.querySelector('input[data-input-otp="true"], input[name="code"], input[autocomplete="one-time-code"], input[maxlength="1"]');
+                if (el && (!el.value || el.value.length < 6)) {
+                    el.focus();
+                    el.value = code;
+                    el.dispatchEvent(new Event('input', { bubbles: true, cancelable: true }));
+                    el.dispatchEvent(new Event('change', { bubbles: true, cancelable: true }));
+                }
+            }""", code)
+        except Exception:
+            pass
 
-        # 2. Click Confirm email button if present
-        confirm_btn = self.page.locator('button:has-text("Confirm email"), button:has-text("Verify"), button[type="submit"]').first
+        time.sleep(0.3)
+
+        # 6. Click Confirm email button if present
+        confirm_btn = self.page.locator('button:has-text("Confirm email"), button:has-text("Verify"), button:has-text("Continue"), button[type="submit"]:not(#onetrust-accept-btn-handler)').first
         if confirm_btn.count() > 0 and confirm_btn.is_visible():
-            confirm_btn.evaluate("el => el.click()")
+            try:
+                confirm_btn.click(timeout=2000, force=True)
+            except Exception:
+                confirm_btn.evaluate("el => el.click()")
 
-        time.sleep(3)
+        # 7. Adaptive wait for next step (Profile page)
+        try:
+            self.page.wait_for_selector(
+                'input[data-testid="givenName"], input[name="givenName"], input[name="password"], input[type="password"]',
+                timeout=12000
+            )
+            # If Profile inputs are visible, OTP was accepted!
+            return True
+        except Exception:
+            pass
 
-        # 3. Check for OTP error message
-        body_text = self.page.locator('body').inner_text()
-        if "code is invalid" in body_text or "code has expired" in body_text or "incorrect" in body_text:
-            raise ValueError("Mã OTP không hợp lệ hoặc đã hết hạn!")
+        # 8. Check for genuine OTP error alerts
+        try:
+            error_loc = self.page.locator('[data-slot="error"], .text-destructive, [role="alert"]')
+            if error_loc.count() > 0 and error_loc.first.is_visible():
+                err_text = error_loc.first.inner_text().strip().lower()
+                if "invalid" in err_text or "expired" in err_text or "incorrect" in err_text:
+                    raise ValueError(f"Mã OTP không hợp lệ hoặc đã hết hạn ({err_text})!")
+        except ValueError:
+            raise
+        except Exception:
+            pass
 
         return True
 
@@ -204,44 +302,56 @@ class AccountCreator:
         logger.info(f"Filling profile: {first_name} {last_name}...")
         
         # 1. Wait for profile inputs: givenName or password
-        self.page.wait_for_selector(
-            'input[data-testid="givenName"], input[name="givenName"], input[name="password"], input[type="password"]',
-            timeout=20000
-        )
-        time.sleep(1)
+        try:
+            self.page.wait_for_selector(
+                'input[data-testid="givenName"], input[name="givenName"], input[name="password"], input[type="password"]',
+                timeout=12000
+            )
+        except Exception:
+            pass
+        time.sleep(0.1)
 
         # 2. First Name (givenName)
-        fn_loc = self.page.locator('input[data-testid="givenName"], input[name="givenName"], input[autocomplete="given-name"], input[placeholder*="First" i]')
+        fn_loc = self.page.locator('input[data-testid="givenName"], input[name="givenName"], input[autocomplete="given-name"], input[placeholder*="First" i]').first
         if fn_loc.count() > 0:
-            fn = fn_loc.first
             try:
-                fn.click(timeout=1500, force=True)
+                fn_loc.click(timeout=1000, force=True)
+                fn_loc.fill("")
+                self.page.keyboard.type(first_name, delay=25)
             except Exception:
-                pass
-            fn.fill(first_name)
-            time.sleep(0.2)
+                fn_loc.fill(first_name)
 
         # 3. Last Name (familyName)
-        ln_loc = self.page.locator('input[data-testid="familyName"], input[name="familyName"], input[autocomplete="family-name"], input[placeholder*="Last" i]')
+        ln_loc = self.page.locator('input[data-testid="familyName"], input[name="familyName"], input[autocomplete="family-name"], input[placeholder*="Last" i]').first
         if ln_loc.count() > 0:
-            ln = ln_loc.first
             try:
-                ln.click(timeout=1500, force=True)
+                ln_loc.click(timeout=1000, force=True)
+                ln_loc.fill("")
+                self.page.keyboard.type(last_name, delay=25)
             except Exception:
-                pass
-            ln.fill(last_name)
-            time.sleep(0.2)
+                ln_loc.fill(last_name)
 
         # 4. Password
-        pwd_loc = self.page.locator('input[data-testid="password"], input[name="password"], input[type="password"]')
+        pwd_loc = self.page.locator('input[data-testid="password"], input[name="password"], input[type="password"]').first
         if pwd_loc.count() > 0:
-            pwd = pwd_loc.first
             try:
-                pwd.click(timeout=1500, force=True)
+                pwd_loc.click(timeout=1000, force=True)
+                pwd_loc.fill("")
+                self.page.keyboard.type(password, delay=25)
             except Exception:
-                pass
-            pwd.fill(password)
-            time.sleep(0.2)
+                pwd_loc.fill(password)
+
+        # Dispatch synthetic blur/change events to ensure React validation enables submit button
+        try:
+            self.page.evaluate("""() => {
+                document.querySelectorAll('input').forEach(el => {
+                    el.dispatchEvent(new Event('input', { bubbles: true }));
+                    el.dispatchEvent(new Event('change', { bubbles: true }));
+                    el.dispatchEvent(new Event('blur', { bubbles: true }));
+                });
+            }""")
+        except Exception:
+            pass
 
         # 5. Active loop: Solve Cloudflare Turnstile, submit registration, and capture SSO cookies
         logger.info("Solving Cloudflare Turnstile & submitting final registration...")
@@ -251,7 +361,7 @@ class AccountCreator:
         session_id = ""
 
         start_wait = time.time()
-        while time.time() - start_wait < 45:
+        while time.time() - start_wait < 25:
             cookies_dict = self.engine.get_cookies_dict()
             sso_cookie = cookies_dict.get("sso", "") or cookies_dict.get("sso_redirect_token", "")
             sso_rw_cookie = cookies_dict.get("sso-rw", "")
@@ -271,33 +381,43 @@ class AccountCreator:
                     pass
 
             if sso_cookie or user_id or "grok.com" in self.page.url or "accounts.x.ai/account" in self.page.url:
-                time.sleep(1)
+                time.sleep(0.3)
                 break
 
-            # A. Click Turnstile checkbox if present in iframe
-            for frame in self.page.frames:
-                if "challenges.cloudflare.com" in frame.url:
-                    try:
+            # A. Click Turnstile checkbox if present in iframe or main DOM
+            try:
+                for frame in self.page.frames:
+                    if "challenges.cloudflare.com" in frame.url:
                         box = frame.locator('input[type="checkbox"], #challenge-stage, .ctp-checkbox-label').first
                         if box.count() > 0 and box.is_visible():
-                            box.click(timeout=1000)
-                    except Exception:
-                        pass
-
-            # B. Trigger submit button or press Enter
-            try:
-                submit_btn = self.page.locator('button[type="submit"], button:has-text("Complete sign up"), button:has-text("Create account"), button:has-text("Sign up"), button:has-text("Tiếp tục")').first
-                if submit_btn.count() > 0 and submit_btn.is_visible():
-                    is_disabled = submit_btn.get_attribute("disabled") is not None
-                    if not is_disabled:
-                        submit_btn.click(timeout=1500)
-                    else:
-                        if pwd_loc and pwd_loc.count() > 0:
-                            pwd_loc.first.press("Enter")
+                            box.click(timeout=1000, force=True)
+                
+                # Check main page turnstile
+                main_ts = self.page.locator('.cf-turnstile, iframe[src*="cloudflare"], #challenge-stage').first
+                if main_ts.count() > 0 and main_ts.is_visible():
+                    main_ts.click(timeout=1000, force=True)
             except Exception:
                 pass
 
-            time.sleep(1.0)
+            # B. Trigger submit button or press Enter
+            try:
+                submit_btn = self.page.locator('button[type="submit"], button:has-text("Complete sign up"), button:has-text("Create account"), button:has-text("Sign up"), button:has-text("Tiếp tục"), button:has-text("Continue")').first
+                if submit_btn.count() > 0 and submit_btn.is_visible():
+                    is_disabled = submit_btn.get_attribute("disabled") is not None
+                    if not is_disabled:
+                        submit_btn.click(timeout=1500, force=True)
+                    else:
+                        if pwd_loc and pwd_loc.count() > 0:
+                            pwd_loc.press("Enter")
+                else:
+                    self.page.evaluate("""() => {
+                        const btn = document.querySelector('button[type="submit"], form button');
+                        if (btn && !btn.disabled) btn.click();
+                    }""")
+            except Exception:
+                pass
+
+            time.sleep(0.5)
 
         # Final cookie refresh to ensure all redirect cookies (sso, sso-rw, x-userid) are captured
         cookies_dict = self.engine.get_cookies_dict()
@@ -307,6 +427,96 @@ class AccountCreator:
             sso_rw_cookie = cookies_dict.get("sso-rw", "")
         if not user_id:
             user_id = cookies_dict.get("x-userid", "")
+
+        # Also pull all cookies across domains from Playwright context
+        if self.page and self.page.context:
+            try:
+                for c in self.page.context.cookies():
+                    c_name = c.get("name", "").lower()
+                    c_val = c.get("value", "")
+                    if not sso_cookie and c_name in ("sso", "sso_redirect_token", "__session", "token", "auth_token", "jwt"):
+                        sso_cookie = c_val
+                    if not sso_rw_cookie and c_name in ("sso-rw", "sso_rw"):
+                        sso_rw_cookie = c_val
+                    if not user_id and c_name in ("x-userid", "user_id", "userid"):
+                        user_id = c_val
+                    # Any JWT string
+                    if not sso_cookie and c_val.startswith("eyJ") and len(c_val) > 40:
+                        sso_cookie = c_val
+            except Exception:
+                pass
+
+        # Check localStorage for auth tokens
+        if not sso_cookie:
+            try:
+                storage_data = self.page.evaluate("""() => {
+                    const data = {};
+                    for (let i = 0; i < localStorage.length; i++) {
+                        const k = localStorage.key(i);
+                        data[k] = localStorage.getItem(k);
+                    }
+                    return data;
+                }""")
+                for k, v in (storage_data or {}).items():
+                    if "sso" in k.lower() or "token" in k.lower() or "auth" in k.lower() or "jwt" in k.lower():
+                        if isinstance(v, str) and (v.startswith("eyJ") or len(v) > 30):
+                            sso_cookie = v
+                            break
+            except Exception:
+                pass
+
+        # If session is still missing, perform instant fallback sign-in recovery
+        if not sso_cookie and not user_id and self.email and self.password:
+            logger.info("Attempting automatic sign-in recovery for newly created account...")
+            try:
+                self.page.goto("https://accounts.x.ai/sign-in?redirect=grok-com", wait_until="domcontentloaded", timeout=15000)
+                time.sleep(1.0)
+
+                # Click 'Sign in with email' if present
+                try:
+                    sign_in_email_btn = self.page.locator('button:has-text("Sign in with email"), a:has-text("Sign in with email")').first
+                    if sign_in_email_btn.count() > 0 and sign_in_email_btn.is_visible():
+                        sign_in_email_btn.click(timeout=1500, force=True)
+                        time.sleep(0.5)
+                except Exception:
+                    pass
+
+                em_inp = self.page.locator('input[type="email"], input[name="email"], input[data-testid="email"]').first
+                if em_inp.count() > 0:
+                    em_inp.click(timeout=1000, force=True)
+                    em_inp.fill(self.email)
+                    
+                    # Click Next or press Enter
+                    next_btn = self.page.locator('button[type="submit"], button:has-text("Next"), button:has-text("Continue"), button:has-text("Tiếp tục")').first
+                    if next_btn.count() > 0 and next_btn.is_visible():
+                        next_btn.click(timeout=1500, force=True)
+                    else:
+                        self.page.keyboard.press("Enter")
+                    time.sleep(1.5)
+
+                pw_inp = self.page.locator('input[type="password"], input[name="password"], input[data-testid="password"]').first
+                if pw_inp.count() > 0:
+                    pw_inp.click(timeout=1000, force=True)
+                    pw_inp.fill(self.password)
+
+                    # Click Log in or press Enter
+                    log_btn = self.page.locator('button[type="submit"], button:has-text("Log in"), button:has-text("Sign in"), button:has-text("Đăng nhập")').first
+                    if log_btn.count() > 0 and log_btn.is_visible():
+                        log_btn.click(timeout=1500, force=True)
+                    else:
+                        self.page.keyboard.press("Enter")
+                    time.sleep(2.5)
+
+                    # Check cookies again
+                    for c in self.page.context.cookies():
+                        if not sso_cookie and c["name"] == "sso":
+                            sso_cookie = c["value"]
+                        if not sso_rw_cookie and c["name"] == "sso-rw":
+                            sso_rw_cookie = c["value"]
+                        if not user_id and c["name"] == "x-userid":
+                            user_id = c["value"]
+            except Exception as e:
+                logger.debug(f"Auto-recovery sign-in notice: {e}")
 
         # Extract user_id from JWT if not present
         if sso_cookie and not user_id:
@@ -322,6 +532,7 @@ class AccountCreator:
         # Mint official xAI / Grok CLI OAuth 2.0 Tokens (at+jwt)
         access_token = ""
         refresh_token = ""
+        time.sleep(1.0)
         try:
             from core.oauth import OAuthTokenManager
             oauth_mgr = OAuthTokenManager()
@@ -331,6 +542,12 @@ class AccountCreator:
             logger.info("Successfully minted official xAI OAuth 2.0 CLI Tokens!")
         except Exception as e:
             logger.warning(f"Auto OAuth token minting notice ({e}). Falling back to SSO session.")
+
+        # Normalize tokens if sso_cookie was extracted as access_token or vice-versa
+        if not sso_cookie and access_token:
+            sso_cookie = access_token
+        if not access_token and sso_cookie and sso_cookie.startswith("eyJ"):
+            access_token = sso_cookie
 
         record = AccountRecord(
             email=self.email or "",

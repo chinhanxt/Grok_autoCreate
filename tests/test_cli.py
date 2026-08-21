@@ -29,3 +29,18 @@ def test_create_single_account_accepts_mailbox_kwarg():
     params = inspect.signature(cli.create_single_account).parameters
     assert "mailbox" in params
     assert params["mailbox"].default is None
+    assert "xai_proxy" in params
+    assert "tempmail_proxy" in params
+
+
+def test_cli_help_decoupled_proxy_options():
+    result = subprocess.run(
+        [sys.executable, "cli.py", "--help"],
+        capture_output=True,
+        text=True,
+        cwd="/home/chinhan/xai-grok-account-creator"
+    )
+    assert result.returncode == 0
+    assert "--xai-proxy" in result.stdout
+    assert "--tempmail-proxy" in result.stdout
+    assert "--tempmail-tor" in result.stdout

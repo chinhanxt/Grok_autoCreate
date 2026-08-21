@@ -16,8 +16,9 @@ CLOUDFLARE_SOLVE_TIMEOUT_SEC = 25
 OTP_POLL_TIMEOUT_SEC = 120
 
 # Default Output Paths
-DEFAULT_JSON_OUTPUT = "accounts.json"
-DEFAULT_TXT_OUTPUT = "accounts.txt"
+PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
+DEFAULT_JSON_OUTPUT = os.path.join(PROJECT_ROOT, "accounts.json")
+DEFAULT_TXT_OUTPUT = os.path.join(PROJECT_ROOT, "accounts.txt")
 
 # Default Tor Proxy Settings
 DEFAULT_TOR_SOCKS_PORT = 9050
@@ -36,13 +37,25 @@ DEFAULT_PASSWORD = "taikhoanAI123"
 
 def generate_random_name(prefix: str = DEFAULT_NAME_PREFIX) -> tuple[str, str]:
     """
-    Generates a random name according to formula: User_<2-digits><2-letters> (e.g. User_01AI, User_84QK).
-    Returns: (first_name, last_name) -> ('User_01AI', 'AI')
+    Shuffle the base word, then append a random 4-char suffix: 2 digits + 2 letters.
+
+    Example base TAIKHOAN -> KHAONTAI47QK, TAIKOAHN03MN
+    Returns: (first_name, last_name) where last_name is the 2 letters.
     """
+    base = (prefix or DEFAULT_NAME_PREFIX).strip() or DEFAULT_NAME_PREFIX
+    chars = list(base)
+    if len(chars) > 1:
+        random.shuffle(chars)
+        shuffled = "".join(chars)
+        if shuffled == base and len(set(base)) > 1:
+            random.shuffle(chars)
+            shuffled = "".join(chars)
+    else:
+        shuffled = base
     num = f"{random.randint(1, 99):02d}"
-    suffix = "".join(random.choices(string.ascii_uppercase, k=2))
-    first_name = f"{prefix}{num}{suffix}"
-    last_name = suffix
+    letters = "".join(random.choices(string.ascii_uppercase, k=2))
+    first_name = f"{shuffled}{num}{letters}"
+    last_name = letters
     return first_name, last_name
 
 

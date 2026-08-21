@@ -48,6 +48,8 @@ def create_single_account(
     last_name: Optional[str] = None,
     use_tempmail: bool = False,
     proxy: Optional[str] = None,
+    xai_proxy: Optional[str] = None,
+    tempmail_proxy: Optional[str] = None,
     headless: bool = True,
     json_path: str = DEFAULT_JSON_OUTPUT,
     txt_path: str = DEFAULT_TXT_OUTPUT,
@@ -55,8 +57,12 @@ def create_single_account(
     mailbox: Optional[MailboxEntry] = None,
 ) -> Optional[AccountRecord]:
     """
-    Executes registration for a single account.
+    Executes registration for a single account with decoupled proxies for xAI and TempMail.
     """
+    # Resolve effective proxies
+    effective_xai_proxy = xai_proxy or proxy
+    effective_tempmail_proxy = tempmail_proxy or proxy
+
     tempmail_client: Optional[TempMailClient] = None
 
     # 1. Determine Email & Credentials
@@ -64,17 +70,19 @@ def create_single_account(
         with console.status("[bold cyan]Creating temporary email inbox (mail.gw / mail.tm)...", spinner="dots"):
             try:
                 if mailbox is not None:
-                    tempmail_client = TempMailClient(proxy=mailbox.proxy)
+                    mbox_proxy = mailbox.proxy or effective_tempmail_proxy
+                    tempmail_client = TempMailClient(proxy=mbox_proxy)
                     tempmail_client.set_token(mailbox.token)
                     email = mailbox.email
                 else:
-                    pool = MailboxPool(proxy_mgr=None, count=1, initial_proxy=proxy)
+                    pool = MailboxPool(proxy_mgr=None, count=1, initial_proxy=effective_tempmail_proxy)
                     pool.prepare()
                     mailbox = pool.acquire(timeout=0)
                     if mailbox is None:
                         console.print("[red]✘ Failed to create tempmail:[/red] không đủ hòm thư Temp-Mail")
                         return None
-                    tempmail_client = TempMailClient(proxy=mailbox.proxy)
+                    mbox_proxy = mailbox.proxy or effective_tempmail_proxy
+                    tempmail_client = TempMailClient(proxy=mbox_proxy)
                     tempmail_client.set_token(mailbox.token)
                     email = mailbox.email
                 console.print(f"[green]✔[/green] Generated TempMail: [bold yellow]{email}[/bold yellow]")
@@ -96,14 +104,15 @@ def create_single_account(
         f"[bold]Target Email:[/bold] {email}\n"
         f"[bold]Name:[/bold] {first_name} {last_name}\n"
         f"[bold]Password:[/bold] {password}\n"
-        f"[bold]Proxy:[/bold] {proxy or 'None (Direct)'}\n"
+        f"[bold]xAI Proxy:[/bold] {effective_xai_proxy or 'None (Direct)'}\n"
+        f"[bold]TempMail Proxy:[/bold] {(mailbox.proxy if mailbox else effective_tempmail_proxy) or 'None (Direct)'}\n"
         f"[bold]Engine:[/bold] Scrapling Stealth (Headless={headless})",
         title="[bold green]Registration Information[/bold green]",
         border_style="cyan"
     ))
 
-    # 2. Launch Stealth Engine & AccountCreator
-    engine = StealthEngine(headless=headless, proxy=proxy)
+    # 2. Launch Stealth Engine & AccountCreator with xAI Proxy
+    engine = StealthEngine(headless=headless, proxy=effective_xai_proxy)
     creator = AccountCreator(engine=engine)
 
     try:
@@ -164,7 +173,10 @@ def main():
     parser.add_argument("--first-name", type=str, default=None, help="Given name (default: auto random formula User_XXYY, e.g. User_01AI)")
     parser.add_argument("--last-name", type=str, default=None, help="Family name")
     parser.add_argument("--tempmail", "-t", action="store_true", help="Auto-generate disposable email & fetch OTP via API")
-    parser.add_argument("--proxy", type=str, help="Custom Proxy URL (http://user:pass@host:port or socks5://host:port)")
+    parser.add_argument("--proxy", type=str, help="Default Proxy URL (applied to both xAI and TempMail if not specified individually)")
+    parser.add_argument("--xai-proxy", type=str, help="Dedicated Proxy URL for xAI / Grok browser registration")
+    parser.add_argument("--tempmail-proxy", type=str, help="Dedicated Proxy URL for TempMail API / OTP retrieval")
+    parser.add_argument("--tempmail-tor", action="store_true", help="Route TempMail specifically through Tor SOCKS5 with Stream Isolation")
     parser.add_argument("--tor", action="store_true", help="Route traffic through local Tor SOCKS5 proxy with auto IP rotation")
     parser.add_argument("--tor-socks", type=int, default=DEFAULT_TOR_SOCKS_PORT, help="Tor SOCKS5 port (default: 9050)")
     parser.add_argument("--tor-control", type=int, default=DEFAULT_TOR_CONTROL_PORT, help="Tor Control port (default: 9051)")
@@ -207,9 +219,28 @@ def main():
 
     tor_mgr: Optional[TorProxyManager] = None
     proxyxoay_mgr: Optional[ProxyXoayManager] = None
-    active_proxy = args.proxy
+    xai_active_proxy: Optional[str] = args.xai_proxy or args.proxy
+    tempmail_active_proxy: Optional[str] = args.tempmail_proxy or args.proxy
 
-    if args.proxyxoay or (args.proxy_key and not args.tor and not args.proxy):
+    # Check if Tor is requested (globally or specifically for TempMail)
+    use_tor_tempmail = args.tempmail_tor or (args.tor and not args.tempmail_proxy)
+    if use_tor_tempmail or args.tor:
+        tor_mgr = TorProxyManager(socks_port=args.tor_socks, control_port=args.tor_control)
+        with console.status("[bold cyan]Connecting to Tor SOCKS5 proxy...", spinner="dots"):
+            ok, ip, details = tor_mgr.check_connection(timeout_sec=6)
+            if ok and ip:
+                country = details.get("country", "") if details else ""
+                console.print(f"[bold green]✔ Connected to Tor Network![/bold green] Exit IP: [bold yellow]{ip}[/bold yellow] ({country})")
+                if args.tor and not args.xai_proxy and not args.proxyxoay:
+                    xai_active_proxy = tor_mgr.proxy_url
+                if use_tor_tempmail:
+                    tempmail_active_proxy = tor_mgr.proxy_url
+            else:
+                console.print(f"[bold red]✘ Could not connect to Tor proxy at {tor_mgr.proxy_url}[/bold red].")
+
+    # Check ProxyXoay for xAI
+    use_proxyxoay = args.proxyxoay or (args.proxy_key and not args.tor and not args.xai_proxy and not args.proxy)
+    if use_proxyxoay:
         proxyxoay_mgr = ProxyXoayManager(
             api_key=args.proxy_key,
             nhamang=args.proxy_nhamang,
@@ -221,26 +252,18 @@ def main():
                 ip = p_data.get("ip") or p_url
                 isp = p_data.get("Nha Mang", "")
                 loc = p_data.get("Vi Tri", "")
-                console.print(f"[bold green]✔ Connected to ProxyXoay![/bold green] IP: [bold yellow]{ip}[/bold yellow] ({isp.upper()} - {loc})")
-                active_proxy = p_url
+                console.print(f"[bold green]✔ Connected to ProxyXoay for xAI![/bold green] IP: [bold yellow]{ip}[/bold yellow] ({isp.upper()} - {loc})")
+                xai_active_proxy = p_url
             else:
                 msg = p_data.get("message") or p_data.get("error") or "Failed"
                 console.print(f"[bold yellow]⚠ ProxyXoay warning: {msg}[/bold yellow]")
 
-    elif args.tor:
-        tor_mgr = TorProxyManager(socks_port=args.tor_socks, control_port=args.tor_control)
-        with console.status("[bold cyan]Connecting to Tor SOCKS5 proxy...", spinner="dots"):
-            ok, ip, details = tor_mgr.check_connection(timeout_sec=6)
-            if ok and ip:
-                country = details.get("country", "") if details else ""
-                console.print(f"[bold green]✔ Connected to Tor Network![/bold green] Exit IP: [bold yellow]{ip}[/bold yellow] ({country})")
-                active_proxy = tor_mgr.proxy_url
-            else:
-                console.print(f"[bold red]✘ Could not connect to Tor proxy at {tor_mgr.proxy_url}[/bold red]. Falling back to default proxy.")
-
+    # Decoupled proxy display
     console.print(Panel(
-        "[bold cyan]⚡ Grok & x.ai Automated Account Creator ⚡[/bold cyan]\n"
-        "[dim]Bypassing Cloudflare Turnstile & gRPC-Web Auth using Scrapling[/dim]",
+        f"[bold cyan]⚡ Grok & x.ai Automated Account Creator ⚡[/bold cyan]\n"
+        f"[dim]Bypassing Cloudflare Turnstile & gRPC-Web Auth using Scrapling[/dim]\n\n"
+        f"[bold]xAI Sign-up Channel:[/bold] {xai_active_proxy or 'Direct (No Proxy)'}\n"
+        f"[bold]TempMail OTP Channel:[/bold] {('Tor SOCKS5 (Stream Isolation)' if (tor_mgr and use_tor_tempmail) else (tempmail_active_proxy or 'Direct'))}",
         border_style="cyan"
     ))
 
@@ -251,8 +274,14 @@ def main():
         # Pre-create a Temp-Mail mailbox pool (serialized) before firing threads
         pool: Optional[MailboxPool] = None
         if args.tempmail:
+            tm_mgr = tor_mgr if (use_tor_tempmail and tor_mgr) else proxyxoay_mgr
             with console.status(f"[bold cyan]Đang tạo hòm thư Temp-Mail #1/{args.count} (serialized)...", spinner="dots"):
-                pool = MailboxPool(proxy_mgr=proxyxoay_mgr, count=args.count, stopped=None, initial_proxy=active_proxy)
+                pool = MailboxPool(
+                    proxy_mgr=tm_mgr,
+                    count=args.count,
+                    stopped=None,
+                    initial_proxy=tempmail_active_proxy if not tm_mgr else None
+                )
                 made = pool.prepare()
             if made < args.count:
                 console.print(
@@ -277,7 +306,8 @@ def main():
                 first_name=args.first_name,
                 last_name=args.last_name,
                 use_tempmail=args.tempmail,
-                proxy=active_proxy,
+                xai_proxy=xai_active_proxy,
+                tempmail_proxy=tempmail_active_proxy,
                 headless=not args.headful,
                 json_path=args.output_json,
                 txt_path=args.output_txt,
@@ -295,18 +325,15 @@ def main():
             # Rotate Proxy on subsequent iterations
             if i > 0:
                 if proxyxoay_mgr:
-                    with console.status("[bold cyan]Rotating ProxyXoay residential IP...", spinner="dots"):
+                    with console.status("[bold cyan]Rotating ProxyXoay residential IP for xAI...", spinner="dots"):
                         rot_ok, new_p, p_data = proxyxoay_mgr.get_proxy(force_rotate=True)
                         if rot_ok and new_p:
                             ip = p_data.get("ip") or new_p
-                            console.print(f"[bold green]✔ Rotated to new Residential IP:[/bold green] [bold yellow]{ip}[/bold yellow]")
-                            active_proxy = new_p
+                            console.print(f"[bold green]✔ Rotated to new Residential IP for xAI:[/bold green] [bold yellow]{ip}[/bold yellow]")
+                            xai_active_proxy = new_p
 
-                elif args.tor and tor_mgr:
-                    with console.status("[bold cyan]Rotating Tor exit node (SIGNAL NEWNYM)...", spinner="dots"):
-                        rot_ok, new_ip = tor_mgr.renew_ip(wait_sec=3.0)
-                        if rot_ok and new_ip:
-                            console.print(f"[bold green]✔ Rotated to new Tor Exit IP:[/bold green] [bold yellow]{new_ip}[/bold yellow]")
+                if tor_mgr and (use_tor_tempmail or args.tor):
+                    tempmail_active_proxy = tor_mgr.get_isolated_proxy_url(f"seq_worker_{i}")
 
             create_single_account(
                 email=args.email,
@@ -314,7 +341,8 @@ def main():
                 first_name=args.first_name,
                 last_name=args.last_name,
                 use_tempmail=args.tempmail,
-                proxy=active_proxy,
+                xai_proxy=xai_active_proxy,
+                tempmail_proxy=tempmail_active_proxy,
                 headless=not args.headful,
                 json_path=args.output_json,
                 txt_path=args.output_txt,

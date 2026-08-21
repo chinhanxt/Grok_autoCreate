@@ -3,6 +3,7 @@ xAI / Grok CLI OAuth 2.0 Token Generation Module.
 Automates Device Authorization flow (RFC 8628) and obtains official 'at+jwt' Access Tokens & Refresh Tokens.
 """
 import time
+import threading
 import requests
 import logging
 from typing import Optional, Dict, Any, Tuple
@@ -41,17 +42,29 @@ class OAuthTokenManager:
             "client_id": self.client_id,
             "scope": self.scope
         }
-        proxies = {"http": proxy, "https": proxy} if proxy else None
-        resp = requests.post(
-            XAI_DEVICE_CODE_URL,
-            data=data,
-            headers=headers,
-            proxies=proxies,
-            timeout=15
-        )
-        if resp.status_code != 200:
-            raise RuntimeError(f"Device code request failed ({resp.status_code}): {resp.text}")
-        return resp.json()
+
+        # Try proxy first if provided, fallback to direct
+        proxy_candidates = [proxy, None] if proxy else [None]
+        last_exc = None
+        for p in proxy_candidates:
+            try:
+                proxies = {"http": p, "https": p} if p else None
+                resp = requests.post(
+                    XAI_DEVICE_CODE_URL,
+                    data=data,
+                    headers=headers,
+                    proxies=proxies,
+                    timeout=15
+                )
+                if resp.status_code == 200:
+                    return resp.json()
+                elif p is None:
+                    raise RuntimeError(f"Device code request failed ({resp.status_code}): {resp.text}")
+            except Exception as e:
+                last_exc = e
+                continue
+
+        raise RuntimeError(f"Device code request failed: {last_exc}")
 
     def authorize_device_flow(self, page: Page, verification_url: str) -> bool:
         """
@@ -59,71 +72,57 @@ class OAuthTokenManager:
         clicks Step 1 (Continue) and Step 2 (Allow) to approve the OAuth CLI grant.
         """
         logger.info(f"Navigating to OAuth device authorization: {verification_url}")
-        # Inject style to hide OneTrust cookie overlays
+        # Explicitly propagate SSO cookies to auth.x.ai and accounts.x.ai to prevent sign-in redirect
         try:
-            page.add_init_script("""
-                window.addEventListener("DOMContentLoaded", () => {
-                    const style = document.createElement("style");
-                    style.innerHTML = "#onetrust-banner-sdk, .onetrust-pc-dark-filter, #onetrust-consent-sdk { display: none !important; }";
-                    document.head.appendChild(style);
-                });
-            """)
+            current_cookies = page.context.cookies()
+            sso_val = next((c["value"] for c in current_cookies if c["name"] == "sso"), None)
+            sso_rw_val = next((c["value"] for c in current_cookies if c["name"] == "sso-rw"), None)
+            if sso_val:
+                extra_cookies = []
+                for domain in [".x.ai", "accounts.x.ai", "auth.x.ai"]:
+                    extra_cookies.append({"name": "sso", "value": sso_val, "domain": domain, "path": "/"})
+                    if sso_rw_val:
+                        extra_cookies.append({"name": "sso-rw", "value": sso_rw_val, "domain": domain, "path": "/"})
+                page.context.add_cookies(extra_cookies)
         except Exception:
             pass
 
-        page.goto(verification_url, wait_until="domcontentloaded")
-        time.sleep(1.5)
-
-        # Step 1: Click 'Continue' / 'Confirm' on device page
         try:
-            btn1 = page.locator('button:has-text("Tiếp tục"), button:has-text("Continue"), button:has-text("Confirm"), button:has-text("继续"), button[type="submit"]').first
-            if btn1.count() > 0:
+            page.goto(verification_url, wait_until="domcontentloaded", timeout=15000)
+        except Exception:
+            pass
+        time.sleep(0.5)
+
+        # Step 1: Wait for Continue button to become enabled and click
+        try:
+            btn1 = page.wait_for_selector(
+                'button:has-text("Continue"), button:has-text("Tiếp tục")',
+                timeout=10000
+            )
+            if btn1:
                 btn1.click(force=True)
         except Exception as e:
             logger.warning(f"Step 1 click warning: {e}")
 
-        # Wait for navigation to consent or done page
+        # Wait for navigation to consent / verify / done page
         try:
-            page.wait_for_url(lambda url: "consent" in url or "done" in url, timeout=8000)
+            page.wait_for_url(lambda url: "consent" in url or "verify" in url or "done" in url, timeout=8000)
         except Exception:
             pass
 
-        time.sleep(1.0)
+        time.sleep(0.3)
 
-        # Step 2: Click 'Allow' on consent page
+        # Step 2: Strictly click Confirm / Allow / Authorize (Never Deny or Cookie banner)
         try:
-            time.sleep(1.5)
-            # Remove any cookie banners
-            page.evaluate("""() => {
-                document.querySelectorAll('#onetrust-consent-sdk, #onetrust-banner-sdk, .onetrust-pc-dark-filter').forEach(el => el.remove());
-            }""")
+            btn2 = page.wait_for_selector(
+                'button:has-text("Allow"):not(#accept-recommended-btn-handler), button:has-text("Confirm"), button:has-text("Authorize"), button:has-text("Cho phép"), button:has-text("Xác nhận")',
+                timeout=10000
+            )
+            if btn2:
+                btn2.click(force=True)
             
-            clicked = page.evaluate("""() => {
-                const buttons = Array.from(document.querySelectorAll('button, input[type="submit"]'));
-                for (const b of buttons) {
-                    const txt = (b.innerText || b.value || '').trim();
-                    if ((txt === 'Allow' || txt === 'Cho phép' || txt === 'Approve') && !b.id.includes('accept') && !b.id.includes('reject')) {
-                        b.click();
-                        return true;
-                    }
-                }
-                // Fallback: look for button inside consent form
-                const submitBtn = document.querySelector('form button[type="submit"]');
-                if (submitBtn) {
-                    submitBtn.click();
-                    return true;
-                }
-                return false;
-            }""")
-            
-            if not clicked:
-                # Fallback to Playwright click if needed
-                btn2 = page.locator('button[type="submit"]:has-text("Allow"), button[type="submit"]:has-text("Cho phép"), button:has-text("Allow"), button:has-text("Cho phép")').first
-                if btn2.count() > 0:
-                    btn2.click(force=True)
-
             try:
-                page.wait_for_url(lambda url: "done" in url, timeout=8000)
+                page.wait_for_url(lambda url: "done" in url, timeout=6000)
             except Exception:
                 pass
             return True
@@ -145,17 +144,28 @@ class OAuthTokenManager:
             "device_code": device_code,
             "client_id": self.client_id
         }
-        proxies = {"http": proxy, "https": proxy} if proxy else None
 
         for attempt in range(max_attempts):
             time.sleep(1.0 if attempt == 0 else 2.0)
-            resp = requests.post(
-                XAI_TOKEN_URL,
-                data=data,
-                headers=headers,
-                proxies=proxies,
-                timeout=15
-            )
+            proxy_candidates = [proxy, None] if proxy else [None]
+            resp = None
+            for p in proxy_candidates:
+                try:
+                    proxies = {"http": p, "https": p} if p else None
+                    resp = requests.post(
+                        XAI_TOKEN_URL,
+                        data=data,
+                        headers=headers,
+                        proxies=proxies,
+                        timeout=15
+                    )
+                    break
+                except Exception:
+                    continue
+
+            if resp is None:
+                continue
+
             if resp.status_code == 200:
                 return resp.json()
 
@@ -188,3 +198,95 @@ class OAuthTokenManager:
         self.authorize_device_flow(page, verify_url)
         tokens = self.exchange_tokens(device_code=device_code, proxy=proxy)
         return tokens
+
+
+_auto_oauth_daemon_running = False
+_in_progress_emails = set()
+_in_progress_lock = threading.Lock()
+
+def start_auto_oauth_daemon(interval_sec: float = 3.0, max_workers: int = 2):
+    """
+    Starts a permanent background daemon that continuously watches accounts.json.
+    Whenever any new or existing account without an OAuth token is detected,
+    it automatically launches a background task to mint and save the OAuth token for that account.
+    """
+    global _auto_oauth_daemon_running
+    if _auto_oauth_daemon_running:
+        return
+    _auto_oauth_daemon_running = True
+
+    def _daemon_worker():
+        from core.engine import StealthEngine
+        from core.exporter import load_accounts, save_account, AccountRecord
+        from config import DEFAULT_JSON_OUTPUT, DEFAULT_TXT_OUTPUT, DEFAULT_PASSWORD
+        from concurrent.futures import ThreadPoolExecutor
+
+        oauth_mgr = OAuthTokenManager()
+
+        def _mint_one(acc):
+            email = acc.get("email")
+            sso = acc.get("sso_cookie")
+            sso_rw = acc.get("sso_rw_cookie", sso)
+            if not email or not sso:
+                return
+
+            with _in_progress_lock:
+                if email in _in_progress_emails:
+                    return
+                _in_progress_emails.add(email)
+
+            logger.info(f"⚡ [Auto-OAuth] Phát hiện tài khoản chưa có token: {email}. Bắt đầu tự động lấy token...")
+            engine = StealthEngine(headless=True)
+            try:
+                page = engine.start()
+                cookies = [
+                    {"name": "sso", "value": sso, "domain": ".x.ai", "path": "/"},
+                    {"name": "sso-rw", "value": sso_rw, "domain": ".x.ai", "path": "/"},
+                    {"name": "sso", "value": sso, "domain": "accounts.x.ai", "path": "/"},
+                    {"name": "sso-rw", "value": sso_rw, "domain": "accounts.x.ai", "path": "/"},
+                    {"name": "sso", "value": sso, "domain": "auth.x.ai", "path": "/"},
+                    {"name": "sso-rw", "value": sso_rw, "domain": "auth.x.ai", "path": "/"},
+                ]
+                page.context.add_cookies(cookies)
+                tokens = oauth_mgr.mint_tokens_for_page(page)
+                
+                rec = AccountRecord(
+                    email=email,
+                    password=acc.get("password", DEFAULT_PASSWORD),
+                    first_name=acc.get("first_name", ""),
+                    last_name=acc.get("last_name", ""),
+                    user_id=acc.get("user_id", "") or tokens.get("id_token", ""),
+                    session_id=acc.get("session_id", ""),
+                    sso_cookie=sso,
+                    sso_rw_cookie=sso_rw,
+                    access_token=tokens["access_token"],
+                    refresh_token=tokens["refresh_token"]
+                )
+                save_account(rec, DEFAULT_JSON_OUTPUT, DEFAULT_TXT_OUTPUT)
+                logger.info(f"🎉 [Auto-OAuth] ĐÃ TỰ ĐỘNG CẤP OAUTH CHO {email} THÀNH CÔNG!")
+            except Exception as e:
+                logger.warning(f"✘ [Auto-OAuth] Lỗi lấy token cho {email}: {e}")
+            finally:
+                engine.close()
+                with _in_progress_lock:
+                    _in_progress_emails.discard(email)
+
+        while True:
+            try:
+                accounts = load_accounts(DEFAULT_JSON_OUTPUT)
+                pending = [
+                    acc for acc in accounts
+                    if not (acc.get("access_token") and acc.get("access_token").startswith("eyJ"))
+                    and acc.get("sso_cookie")
+                    and acc.get("email") not in _in_progress_emails
+                ]
+                if pending:
+                    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+                        list(pool.map(_mint_one, pending[:max_workers * 2]))
+            except Exception as e:
+                pass
+            time.sleep(interval_sec)
+
+    t = threading.Thread(target=_daemon_worker, daemon=True, name="AutoOAuthDaemon")
+    t.start()
+    logger.info("🚀 Đã kích hoạt [HỆ THỐNG TỰ ĐỘNG LẤY TOKEN OAUTH CHO MỌI TÀI KHOẢN MỚI]")

@@ -10,7 +10,25 @@ let totalLogCount = 0;
 document.addEventListener("DOMContentLoaded", () => {
   loadAccounts();
   updateLoopBadge();
-  toggleRotatingProxySettings();
+  updateThreadBadge();
+  renderThreadsGrid();
+  checkRotatingProxyStatus();
+  checkTorStatus();
+  try {
+    const savedPrefix = localStorage.getItem("xai_name_prefix");
+    if (savedPrefix && document.getElementById("namePrefix")) {
+      document.getElementById("namePrefix").value = savedPrefix;
+    }
+  } catch (e) {}
+  toggleNameInputs();
+
+  const btnThreadsToggle = document.getElementById("btnOpenThreadsModal");
+  if (btnThreadsToggle) {
+    btnThreadsToggle.addEventListener("click", (e) => {
+      e.preventDefault();
+      openThreadsModal();
+    });
+  }
 
   // Enter to start
   document.addEventListener("keydown", (e) => {
@@ -104,7 +122,7 @@ function updateLoopBadge() {
   if (val > 100000) val = 100000;
   
   const btnText = document.getElementById("btnCreateText");
-  if (btnText) btnText.innerText = val > 1 ? `BẮT ĐẦU TẠO (${val} ACC)` : "BẮT ĐẦU TẠO";
+  if (btnText) btnText.innerText = val > 1 ? `BẮT ĐẦU (${val})` : "BẮT ĐẦU";
 }
 
 function setCount(num) {
@@ -117,28 +135,59 @@ function setCount(num) {
 
 function updateThreadBadge() {
   const t = document.getElementById("threadCount")?.value || "1";
-  const badge = document.getElementById("threadSpeedBadge");
-  if (badge) {
-    if (t === "1") {
-      badge.innerText = "x1 Chuẩn";
-      badge.style.background = "rgba(148, 163, 184, 0.15)";
-      badge.style.color = "#94a3b8";
-      badge.style.borderColor = "rgba(148, 163, 184, 0.3)";
-    } else {
-      badge.innerText = `x${t} Tốc độ`;
-      badge.style.background = "rgba(34, 197, 94, 0.15)";
-      badge.style.color = "#22c55e";
-      badge.style.borderColor = "rgba(34, 197, 94, 0.3)";
-    }
+  currentThreadCount = parseInt(t) || 1;
+  const btnText = document.getElementById("btnThreadsText");
+  if (btnText) {
+    btnText.innerText = `📊 TIẾN TRÌNH (${t} LUỒNG)`;
   }
 }
 
 function toggleNameInputs() {
   const isRandom = document.getElementById("randomNameCheckbox").checked;
   const customRow = document.getElementById("customNameRow");
+  const randomRow = document.getElementById("randomNameRow");
   if (customRow) {
     customRow.style.display = isRandom ? "none" : "flex";
   }
+  if (randomRow) {
+    randomRow.style.display = isRandom ? "flex" : "none";
+  }
+  if (isRandom) updateNamePreview();
+}
+
+function shuffleString(value) {
+  const src = String(value || "");
+  if (src.length <= 1) return src;
+  let shuffled = src;
+  for (let attempt = 0; attempt < 8; attempt++) {
+    const chars = src.split("");
+    for (let i = chars.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [chars[i], chars[j]] = [chars[j], chars[i]];
+    }
+    shuffled = chars.join("");
+    if (shuffled !== src || new Set(src).size === 1) break;
+  }
+  return shuffled;
+}
+
+function randomNameSuffix() {
+  const digits = String(Math.floor(Math.random() * 99) + 1).padStart(2, "0");
+  const letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+  const a = letters[Math.floor(Math.random() * 26)];
+  const b = letters[Math.floor(Math.random() * 26)];
+  return `${digits}${a}${b}`;
+}
+
+function updateNamePreview() {
+  const prefixInput = document.getElementById("namePrefix");
+  const preview = document.getElementById("namePreview");
+  if (!prefixInput || !preview) return;
+  const prefix = (prefixInput.value || "TAIKHOAN").trim() || "TAIKHOAN";
+  preview.textContent = `${shuffleString(prefix)}${randomNameSuffix()}`;
+  try {
+    localStorage.setItem("xai_name_prefix", prefix);
+  } catch (e) {}
 }
 
 function toggleTorSettings() {
@@ -147,13 +196,6 @@ function toggleTorSettings() {
   if (torRow) torRow.style.display = useTor ? "block" : "none";
 
   if (useTor) {
-    // Uncheck ProxyXoay to prevent conflict
-    const rotCheck = document.getElementById("useRotatingProxyCheckbox");
-    if (rotCheck) {
-      rotCheck.checked = false;
-      const rotRow = document.getElementById("rotatingProxyConfigRow");
-      if (rotRow) rotRow.style.display = "none";
-    }
     checkTorStatus();
   }
 }
@@ -164,13 +206,6 @@ function toggleRotatingProxySettings() {
   if (rotRow) rotRow.style.display = useRot ? "block" : "none";
 
   if (useRot) {
-    // Uncheck Tor to prevent conflict
-    const torCheck = document.getElementById("useTorCheckbox");
-    if (torCheck) {
-      torCheck.checked = false;
-      const torRow = document.getElementById("torConfigRow");
-      if (torRow) torRow.style.display = "none";
-    }
     checkRotatingProxyStatus();
   }
 }
@@ -305,65 +340,87 @@ async function testOrRotateProxyXoay() {
   }
 }
 
-async function checkTorStatus() {
-  const badge = document.getElementById("torStatusBadge");
-  const ipText = document.getElementById("torIpText");
-  const locText = document.getElementById("torLocText");
-  const socksPort = document.getElementById("torSocksPort")?.value || 9050;
-  const controlPort = document.getElementById("torControlPort")?.value || 9051;
+async function checkTorStatus(channel = 0) {
+  if (channel === 0 || channel === 1) {
+    const badge = document.getElementById("torStatusBadge");
+    const ipText = document.getElementById("torIpText");
+    const socksPort = document.getElementById("torSocksPort")?.value || 9050;
+    const controlPort = document.getElementById("torControlPort")?.value || 9051;
 
-  if (ipText) ipText.innerText = "Đang kiểm tra...";
-  if (locText) locText.innerText = "";
+    if (ipText) ipText.innerText = "Đang tải...";
 
-  try {
-    const res = await fetch(`/api/tor/status?socks_port=${socksPort}&control_port=${controlPort}`);
-    const data = await res.json();
-    if (data.online && data.ip) {
-      const country = data.details?.country || "";
-      const city = data.details?.city || "";
-      const loc = (city || country) ? `[${city ? city + ', ' : ''}${country}]` : "";
-      if (badge) {
-        badge.className = "tor-indicator";
-        badge.innerHTML = `<span class="tor-dot"></span><span class="tor-conn-label">SOCKS5</span>`;
+    try {
+      const res = await fetch(`/api/tor/status?socks_port=${socksPort}&control_port=${controlPort}`);
+      const data = await res.json();
+      if (data.online && data.ip) {
+        if (badge) {
+          badge.className = "tor-indicator";
+          badge.innerHTML = `<span class="tor-dot"></span><span class="tor-conn-label">TOR 1</span>`;
+        }
+        if (ipText) ipText.innerText = data.ip;
+      } else {
+        if (badge) {
+          badge.className = "tor-indicator offline";
+          badge.innerHTML = `<span class="tor-dot"></span><span class="tor-conn-label">OFFLINE</span>`;
+        }
+        if (ipText) ipText.innerText = "Chưa kết nối Tor 1";
       }
-      if (ipText) ipText.innerText = data.ip;
-      if (locText) locText.innerText = loc;
-    } else {
-      if (badge) {
-        badge.className = "tor-indicator offline";
-        badge.innerHTML = `<span class="tor-dot"></span><span class="tor-conn-label">OFFLINE</span>`;
-      }
-      if (ipText) ipText.innerText = "Chưa kết nối Tor";
-      if (locText) locText.innerText = "(Kiểm tra port 9050)";
+    } catch (e) {
+      if (ipText) ipText.innerText = "Lỗi kết nối";
     }
-  } catch (e) {
-    if (ipText) ipText.innerText = "Lỗi kết nối";
+  }
+
+  if (channel === 0 || channel === 2) {
+    const badge2 = document.getElementById("tor2StatusBadge");
+    const ipText2 = document.getElementById("tor2IpText");
+    const socksPort2 = document.getElementById("tor2SocksPort")?.value || 9052;
+    const controlPort2 = document.getElementById("tor2ControlPort")?.value || 9053;
+
+    if (ipText2) ipText2.innerText = "Đang tải...";
+
+    try {
+      const res2 = await fetch(`/api/tor/status?socks_port=${socksPort2}&control_port=${controlPort2}`);
+      const data2 = await res2.json();
+      if (data2.online && data2.ip) {
+        if (badge2) {
+          badge2.className = "tor-indicator";
+          badge2.innerHTML = `<span class="tor-dot"></span><span class="tor-conn-label">TOR 2</span>`;
+        }
+        if (ipText2) ipText2.innerText = data2.ip;
+      } else {
+        if (badge2) {
+          badge2.className = "tor-indicator offline";
+          badge2.innerHTML = `<span class="tor-dot"></span><span class="tor-conn-label">OFFLINE</span>`;
+        }
+        if (ipText2) ipText2.innerText = "Chưa kết nối Tor 2";
+      }
+    } catch (e) {
+      if (ipText2) ipText2.innerText = "Lỗi kết nối";
+    }
   }
 }
 
-async function testOrRotateTorIp() {
-  const btn = document.getElementById("btnRotateIp");
-  const ipText = document.getElementById("torIpText");
-  const locText = document.getElementById("torLocText");
-  const socksPort = document.getElementById("torSocksPort")?.value || 9050;
-  const controlPort = document.getElementById("torControlPort")?.value || 9051;
+async function testOrRotateTorIp(channel = 1) {
+  const isCh2 = channel === 2;
+  const btn = document.getElementById(isCh2 ? "btnRotateTor2Ip" : "btnRotateIp");
+  const ipText = document.getElementById(isCh2 ? "tor2IpText" : "torIpText");
+  const socksPort = document.getElementById(isCh2 ? "tor2SocksPort" : "torSocksPort")?.value || (isCh2 ? 9052 : 9050);
+  const controlPort = document.getElementById(isCh2 ? "tor2ControlPort" : "torControlPort")?.value || (isCh2 ? 9053 : 9051);
 
   if (btn) btn.classList.add("rotating");
   if (ipText) ipText.innerText = "Đang đổi IP...";
-  if (locText) locText.innerText = "SIGNAL NEWNYM";
 
   try {
     const res = await fetch(`/api/tor/renew-ip?socks_port=${socksPort}&control_port=${controlPort}`, { method: "POST" });
     const data = await res.json();
     if (data.success && data.ip) {
-      showToast(`Đã đổi Tor Exit IP mới: ${data.ip}`, "success");
-      await checkTorStatus();
+      showToast(`Đã đổi Tor ${channel} Exit IP: ${data.ip}`, "success");
     } else {
-      showToast("Không thể đổi IP (Kiểm tra Control Port 9051)", "error");
-      await checkTorStatus();
+      showToast(`Đã đổi IP Tor ${channel}`, "info");
     }
+    await checkTorStatus(channel);
   } catch (e) {
-    showToast("Lỗi kết nối Tor Control", "error");
+    showToast(`Lỗi kết nối Tor ${channel}`, "error");
   } finally {
     if (btn) btn.classList.remove("rotating");
   }
@@ -378,13 +435,15 @@ async function startCreation() {
   const isRandom = document.getElementById("randomNameCheckbox").checked;
   const firstName = isRandom ? null : (document.getElementById("firstName").value.trim() || null);
   const lastName = isRandom ? null : (document.getElementById("lastName").value.trim() || null);
+  const namePrefix = (document.getElementById("namePrefix")?.value || "TAIKHOAN").trim() || "TAIKHOAN";
   const password = document.getElementById("password").value.trim() || "taikhoanAI123";
 
   const useTor = document.getElementById("useTorCheckbox")?.checked || false;
   const useRotating = document.getElementById("useRotatingProxyCheckbox")?.checked || false;
 
   let proxyMode = "direct";
-  if (useRotating) proxyMode = "rotating";
+  if (useRotating && useTor) proxyMode = "decoupled";
+  else if (useRotating) proxyMode = "rotating";
   else if (useTor) proxyMode = "tor";
 
   const torSocksPort = parseInt(document.getElementById("torSocksPort")?.value) || 9050;
@@ -398,7 +457,30 @@ async function startCreation() {
   btnStop.disabled = false;
   btnStop.querySelector("span").innerText = "DỪNG";
 
+  const numThreads = parseInt(document.getElementById("threadCount")?.value) || 1;
+  currentThreadCount = numThreads;
+  currentThreadStates = {};
+  for (let i = 1; i <= numThreads; i++) {
+    currentThreadStates[String(i)] = {
+      id: i,
+      status: "running",
+      account_num: i <= count ? i : 0,
+      email: "",
+      step: "1. Khởi tạo trình duyệt...",
+      progress: 10,
+      elapsed_sec: 0
+    };
+  }
+
+  const btnThreads = document.getElementById("btnOpenThreadsModal");
+  if (btnThreads) {
+    btnThreads.style.display = "inline-flex";
+    const textEl = document.getElementById("btnThreadsText");
+    if (textEl) textEl.innerText = `📊 TIẾN TRÌNH (${numThreads} LUỒNG)`;
+  }
+
   setSystemState("running");
+  startLiveTimer();
 
   if (progressContainer) {
     progressContainer.style.display = "block";
@@ -406,7 +488,7 @@ async function startCreation() {
   }
 
   lastKnownSuccessCount = 0;
-  logMessage(`Bắt đầu tiến trình tạo ${count} tài khoản...`, "HỆ THỐNG");
+  logMessage(`Bắt đầu chạy ${numThreads} luồng song song (tổng ${count} acc)...`, "HỆ THỐNG");
 
   const payload = {
     email: null,
@@ -417,15 +499,17 @@ async function startCreation() {
     proxy: null,
     headless: true,
     count: count,
-    threads: parseInt(document.getElementById("threadCount")?.value) || 1,
+    threads: numThreads,
     random_name: isRandom,
-    proxy_mode: proxyMode,
-    use_tor: useTor,
-    tor_socks_port: torSocksPort,
-    tor_control_port: torControlPort,
-    rotating_proxy_key: rotatingKey,
-    rotating_proxy_nhamang: rotatingNhamang,
-    rotating_proxy_tinhthanh: rotatingTinhthanh
+    name_prefix: namePrefix,
+    proxy_mode: "decoupled",
+    use_tor: true,
+    tor_for_tempmail: true,
+    tor_socks_port: 9050,
+    tor_control_port: 9051,
+    rotating_proxy_key: "HVnSXrEVXRSrUYBkwYzuId",
+    rotating_proxy_nhamang: "random",
+    rotating_proxy_tinhthanh: "0"
   };
 
   try {
@@ -445,6 +529,7 @@ async function startCreation() {
     logMessage(err.message, "LỖI");
     showToast(err.message, "error");
     resetCreateButton();
+    stopLiveTimer();
     setSystemState("error");
   }
 }
@@ -454,7 +539,7 @@ async function stopCreation() {
   const btnStop = document.getElementById("btnStopAccount");
   btnStop.disabled = true;
   btnStop.querySelector("span").innerText = "ĐANG DỪNG...";
-  logMessage("Đang gửi yêu cầu dừng tiến trình...", "CẢNH BÁO");
+  logMessage("Đang gửi yêu cầu dừng...", "CẢNH BÁO");
 
   try {
     const res = await fetch(`/api/stop-task/${activeTaskId}`, { method: "POST" });
@@ -472,9 +557,143 @@ function updateProgress(current, total, success) {
   const barEl = document.getElementById("progressBar");
 
   const percent = total > 0 ? Math.round((current / total) * 100) : 0;
-  if (statusEl) statusEl.innerText = `Đang xử lý: ${current}/${total} (Xong: ${success})`;
+  if (statusEl) statusEl.innerText = `${current}/${total} (Xong: ${success})`;
   if (percentEl) percentEl.innerText = `${percent}%`;
   if (barEl) barEl.style.width = `${percent}%`;
+}
+
+// Live Elapsed Timer
+let taskStartTime = null;
+let liveTimerInterval = null;
+
+function formatElapsed(sec) {
+  const m = Math.floor(sec / 60);
+  const s = sec % 60;
+  return `${m < 10 ? '0' : ''}${m}:${s < 10 ? '0' : ''}${s}`;
+}
+
+function startLiveTimer(serverStartTime) {
+  taskStartTime = serverStartTime ? (serverStartTime * 1000) : Date.now();
+  if (liveTimerInterval) clearInterval(liveTimerInterval);
+  
+  const timerBadge = document.getElementById("liveTimerBadge");
+  const consoleTimer = document.getElementById("consoleTimerTag");
+  if (timerBadge) timerBadge.style.display = "inline-flex";
+  if (consoleTimer) consoleTimer.style.display = "inline-flex";
+
+  const update = () => {
+    const elapsedSec = Math.floor((Date.now() - taskStartTime) / 1000);
+    const timeStr = formatElapsed(elapsedSec);
+    
+    const t1 = document.getElementById("liveTimerText");
+    const t2 = document.getElementById("consoleTimerText");
+    const t3 = document.getElementById("modalTimerBadge");
+    if (t1) t1.innerText = timeStr;
+    if (t2) t2.innerText = timeStr;
+    if (t3) t3.innerText = `⏱ ${timeStr}`;
+  };
+
+  update();
+  liveTimerInterval = setInterval(update, 1000);
+}
+
+function stopLiveTimer() {
+  if (liveTimerInterval) {
+    clearInterval(liveTimerInterval);
+    liveTimerInterval = null;
+  }
+}
+
+// Threads Monitor Modal
+let currentThreadStates = {};
+let currentThreadCount = 1;
+
+function openThreadsModal() {
+  const modal = document.getElementById("threadsModal");
+  if (modal) {
+    modal.style.display = "flex";
+    renderThreadsGrid();
+  }
+}
+
+function closeThreadsModal() {
+  const modal = document.getElementById("threadsModal");
+  if (modal) modal.style.display = "none";
+}
+
+function handleModalBackdropClick(event) {
+  if (event.target.id === "threadsModal") {
+    closeThreadsModal();
+  }
+}
+
+window.openThreadsModal = openThreadsModal;
+window.closeThreadsModal = closeThreadsModal;
+window.handleModalBackdropClick = handleModalBackdropClick;
+
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") closeThreadsModal();
+});
+
+function renderThreadsGrid() {
+  const container = document.getElementById("threadsGridContainer");
+  if (!container) return;
+
+  const tCount = currentThreadCount || 1;
+  const modalTitle = document.getElementById("threadsModalTitle");
+  if (modalTitle) {
+    modalTitle.innerText = `TIẾN TRÌNH SONG SONG (${tCount} LUỒNG)`;
+  }
+
+  let html = "";
+  for (let i = 1; i <= tCount; i++) {
+    const t = currentThreadStates[String(i)] || {
+      id: i,
+      status: "idle",
+      account_num: 0,
+      email: "",
+      step: "Sẵn sàng...",
+      progress: 0,
+      elapsed_sec: 0
+    };
+
+    let statusClass = "idle";
+    let statusLabel = "CHỜ";
+    if (t.status === "running") {
+      statusClass = "running";
+      statusLabel = "ĐANG CHẠY";
+    } else if (t.status === "success") {
+      statusClass = "success";
+      statusLabel = "THÀNH CÔNG";
+    } else if (t.status === "error") {
+      statusClass = "error";
+      statusLabel = "LỖI";
+    }
+
+    const targetText = t.account_num > 0 ? `Acc #${t.account_num}` : "Chờ lệnh";
+    const emailText = t.email ? `(${t.email})` : "";
+    const progressPct = t.progress || 0;
+    const stepText = t.step || "Đang xử lý...";
+    const elapsedText = t.elapsed_sec > 0 ? `⏱ ${t.elapsed_sec}s` : "";
+
+    html += `
+      <div class="thread-card ${statusClass === 'running' ? 'active' : statusClass}">
+        <div class="thread-card-top">
+          <span class="thread-name-tag">LUỒNG #${i}</span>
+          <span class="thread-status-pill ${statusClass}">${statusLabel}</span>
+        </div>
+        <div class="thread-target-info">
+          <span class="thread-target-acc" title="${emailText}">${targetText} ${emailText}</span>
+          <span class="thread-timer">${elapsedText}</span>
+        </div>
+        <div class="thread-progress-wrap">
+          <div class="thread-progress-bar" style="width: ${progressPct}%;"></div>
+        </div>
+        <div class="thread-step-text" title="${stepText}">${stepText}</div>
+      </div>
+    `;
+  }
+  container.innerHTML = html;
 }
 
 function startTaskPolling(taskId) {
@@ -501,6 +720,25 @@ function startTaskPolling(taskId) {
       const success = data.success_count || 0;
       updateProgress(current, total, success);
 
+      // Update Thread states
+      if (data.thread_states) {
+        currentThreadStates = data.thread_states;
+      }
+      if (data.threads) {
+        currentThreadCount = data.threads;
+      }
+
+      const modalProgressBadge = document.getElementById("modalProgressBadge");
+      if (modalProgressBadge) {
+        modalProgressBadge.innerText = `${success}/${total} Acc`;
+      }
+
+      // If modal is currently open, re-render
+      const modal = document.getElementById("threadsModal");
+      if (modal && modal.style.display !== "none") {
+        renderThreadsGrid();
+      }
+
       if (success > lastKnownSuccessCount) {
         lastKnownSuccessCount = success;
         loadAccounts();
@@ -509,23 +747,29 @@ function startTaskPolling(taskId) {
       if (data.status === "success") {
         clearInterval(pollInterval);
         activeTaskId = null;
+        stopLiveTimer();
         resetCreateButton();
         setSystemState("success");
         showToast(`Hoàn tất: Đã tạo ${success}/${total} tài khoản`, "success");
         loadAccounts();
+        renderThreadsGrid();
       } else if (data.status === "stopped") {
         clearInterval(pollInterval);
         activeTaskId = null;
+        stopLiveTimer();
         resetCreateButton();
         setSystemState("idle");
-        showToast(`Đã dừng: Tạo được ${success}/${total} tài khoản`, "info");
+        showToast(`Đã dừng (${success}/${total} tài khoản)`, "info");
         loadAccounts();
+        renderThreadsGrid();
       } else if (data.status === "failed") {
         clearInterval(pollInterval);
         activeTaskId = null;
+        stopLiveTimer();
         resetCreateButton();
         setSystemState("error");
         showToast(data.error || "Tác vụ thất bại", "error");
+        renderThreadsGrid();
       }
     } catch (e) {
       console.error("Polling error:", e);
@@ -555,6 +799,39 @@ let perPage = 10;
 let currentFilterType = "all";
 let searchQuery = "";
 
+function updateOAuthSyncStats() {
+  const total = allAccounts.length;
+  const oauthCount = allAccounts.filter(a => a.access_token && a.access_token.startsWith("eyJ")).length;
+  const pendingCount = total - oauthCount;
+
+  // 1. Top nav badge
+  const topBadge = document.getElementById("oauthCountBadge");
+  if (topBadge) {
+    topBadge.innerHTML = `<span style="color: ${pendingCount === 0 ? '#34d399' : '#fbbf24'}">●</span> ${oauthCount}/${total} OAuth`;
+    topBadge.title = `Đã có OAuth Token: ${oauthCount}/${total} (Chưa có: ${pendingCount})`;
+  }
+
+  // 2. Badge next to sync button
+  const statusBadge = document.getElementById("oauthStatusBadge");
+  const syncText = document.getElementById("oauthSyncText");
+  if (statusBadge && syncText) {
+    if (total === 0) {
+      statusBadge.style.display = "none";
+    } else {
+      statusBadge.style.display = "inline-flex";
+      if (pendingCount === 0) {
+        statusBadge.className = "oauth-sync-badge all-synced";
+        syncText.innerHTML = `✔ Đã đủ: <strong>${oauthCount}/${total}</strong> OAuth`;
+      } else {
+        statusBadge.className = "oauth-sync-badge";
+        syncText.innerHTML = `Chưa có OAuth: <strong>${pendingCount}</strong> / ${total}`;
+      }
+    }
+  }
+
+  return { total, oauthCount, pendingCount };
+}
+
 async function loadAccounts() {
   try {
     const res = await fetch("/api/accounts");
@@ -563,6 +840,7 @@ async function loadAccounts() {
     if (badge) {
       badge.innerText = `${allAccounts.length} TÀI KHOẢN`;
     }
+    updateOAuthSyncStats();
     applyFiltersAndPagination();
   } catch (err) {
     console.error("Failed to load accounts:", err);
@@ -601,7 +879,7 @@ function applyFiltersAndPagination() {
     if (!matchesSearch) return false;
 
     // 2. Token Type Filter
-    const hasOAuth = acc.access_token && acc.access_token.startsWith("eyJ0eXAiOiJhdCtqd3Qi");
+    const hasOAuth = acc.access_token && acc.access_token.startsWith("eyJ");
     if (currentFilterType === "oauth") {
       return hasOAuth;
     } else if (currentFilterType === "sso") {
@@ -663,7 +941,7 @@ function renderCurrentPage() {
   tbody.innerHTML = "";
   pageItems.forEach((acc) => {
     const isSelected = selectedEmails.has(acc.email);
-    const hasOAuth = acc.access_token && acc.access_token.startsWith("eyJ0eXAiOiJhdCtqd3Qi");
+    const hasOAuth = acc.access_token && acc.access_token.startsWith("eyJ");
     const fullLine = `${acc.email}:${acc.password}:${acc.sso_cookie || ''}:${acc.user_id || ''}`;
     const displayName = acc.first_name ? `${acc.first_name} ${acc.last_name || ''}`.trim() : '';
 
@@ -847,7 +1125,7 @@ function exportData(format) {
   if (format === "oauth") {
     // Format into standard Grok Router OAuth format
     const oauthData = exportList.map(acc => {
-      const accTok = (acc.access_token && acc.access_token.startsWith("eyJ0eXAiOiJhdCtqd3Qi")) 
+      const accTok = (acc.access_token && acc.access_token.startsWith("eyJ")) 
         ? acc.access_token 
         : (acc.sso_cookie || "");
       const refTok = acc.refresh_token || acc.sso_rw_cookie || acc.sso_cookie || "";
@@ -921,4 +1199,44 @@ function escapeHtml(str) {
 function escapeAttr(str) {
   if (!str) return "";
   return String(str).replace(/'/g, "\\'").replace(/"/g, "&quot;");
+}
+
+async function syncAllOAuthTokens() {
+  const btn = document.getElementById("btnSyncOAuth");
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = "⏳ ĐANG ĐỒNG BỘ 10 LUỒNG...";
+  }
+  showToast("Đang kích hoạt đồng bộ 10 luồng song song...", "info");
+  try {
+    const res = await fetch("/api/sync-oauth", { method: "POST" });
+    const data = await res.json();
+    showToast(data.message || "Đã bắt đầu đồng bộ OAuth Token!", "success");
+    
+    let maxPolls = 80;
+    const pollTimer = setInterval(async () => {
+      await loadAccounts();
+      const stats = updateOAuthSyncStats();
+      if (btn && stats.pendingCount > 0) {
+        btn.textContent = `⏳ ĐỒNG BỘ (Còn ${stats.pendingCount})...`;
+      }
+      if (stats.pendingCount === 0 || maxPolls <= 0) {
+        clearInterval(pollTimer);
+        if (btn) {
+          btn.disabled = false;
+          btn.textContent = "⚡ ĐỒNG BỘ OAUTH";
+        }
+        if (stats.pendingCount === 0) {
+          showToast(`Hoàn tất! 100% tài khoản (${stats.total}/${stats.total}) đã có OAuth 2.0!`, "success");
+        }
+      }
+      maxPolls--;
+    }, 1500);
+  } catch (err) {
+    showToast("Lỗi đồng bộ: " + err.message, "error");
+    if (btn) {
+      btn.disabled = false;
+      btn.textContent = "⚡ ĐỒNG BỘ OAUTH";
+    }
+  }
 }

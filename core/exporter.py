@@ -52,42 +52,60 @@ class AccountRecord:
         return f"{self.email}:{self.password}:{self.sso_cookie}:{self.user_id}"
 
 
+_FILE_LOCK = __import__("threading").Lock()
+
+
 def save_account(
     account: AccountRecord,
     json_path: str = "accounts.json",
     txt_path: str = "accounts.txt"
 ) -> None:
     """
-    Saves an AccountRecord to both JSON and TXT format.
+    Saves an AccountRecord to both JSON and TXT format in a thread-safe manner.
     """
-    # 1. Update JSON file
-    existing_accounts: List[Dict[str, Any]] = []
-    if os.path.exists(json_path):
-        try:
-            with open(json_path, "r", encoding="utf-8") as f:
-                existing_accounts = json.load(f)
-                if not isinstance(existing_accounts, list):
-                    existing_accounts = []
-        except Exception:
-            existing_accounts = []
+    with _FILE_LOCK:
+        # 1. Update JSON file
+        existing_accounts: List[Dict[str, Any]] = []
+        if os.path.exists(json_path):
+            try:
+                with open(json_path, "r", encoding="utf-8") as f:
+                    existing_accounts = json.load(f)
+                    if not isinstance(existing_accounts, list):
+                        existing_accounts = []
+            except Exception:
+                existing_accounts = []
 
-    # Check if email already exists, update or append
-    account_dict = account.to_dict()
-    updated = False
-    for i, acc in enumerate(existing_accounts):
-        if acc.get("email", "").lower() == account.email.lower():
-            existing_accounts[i] = account_dict
-            updated = True
-            break
-    if not updated:
-        existing_accounts.append(account_dict)
+        # Check if email already exists, update or append
+        account_dict = account.to_dict()
+        updated = False
+        for i, acc in enumerate(existing_accounts):
+            if acc.get("email", "").lower() == account.email.lower():
+                # Preserve existing access_token if new record does not have one
+                if not account_dict.get("access_token") and acc.get("access_token"):
+                    account_dict["access_token"] = acc["access_token"]
+                    account_dict["refresh_token"] = acc.get("refresh_token", "")
+                existing_accounts[i] = account_dict
+                updated = True
+                break
+        if not updated:
+            existing_accounts.append(account_dict)
 
-    with open(json_path, "w", encoding="utf-8") as f:
-        json.dump(existing_accounts, f, indent=2, ensure_ascii=False)
+        with open(json_path, "w", encoding="utf-8") as f:
+            json.dump(existing_accounts, f, indent=2, ensure_ascii=False)
 
-    # 2. Append to TXT file
-    with open(txt_path, "a", encoding="utf-8") as f:
-        f.write(account.to_line_format() + "\n")
+        # 2. Append or rewrite TXT file
+        with open(txt_path, "w", encoding="utf-8") as f:
+            for acc in existing_accounts:
+                line = f"{acc.get('email', '')}:{acc.get('password', '')}:{acc.get('sso_cookie', '')}:{acc.get('user_id', '')}"
+                f.write(line + "\n")
+
+        # 3. Trigger auto-oauth daemon if this account lacks OAuth access token
+        if not (account_dict.get("access_token") and account_dict.get("access_token").startswith("eyJ")) and account_dict.get("sso_cookie"):
+            try:
+                from core.oauth import start_auto_oauth_daemon
+                start_auto_oauth_daemon()
+            except Exception:
+                pass
 
 
 def load_accounts(json_path: str = "accounts.json") -> List[Dict[str, Any]]:

@@ -78,11 +78,16 @@ class StealthEngine:
         # 1. Try Camoufox
         if USE_CAMOUFOX:
             try:
+                import asyncio
+                try:
+                    asyncio.set_event_loop(None)
+                except Exception:
+                    pass
                 self.camoufox_cm = Camoufox(
                     headless=self.headless,
                     proxy=proxy_cfg,
                     humanize=True,
-                    geoip=True
+                    geoip=False
                 )
                 self.browser = self.camoufox_cm.__enter__()
                 self.context = self.browser.new_context()
@@ -129,8 +134,30 @@ class StealthEngine:
     def _setup_network_listeners(self):
         """
         Listens to network responses to capture authentication cookies and RPC responses.
+        Filters out heavy unnecessary resources (images, fonts, media, tracking) to maximize speed.
         """
         import re
+
+        try:
+            def _route_filter(route):
+                req = route.request
+                url = req.url
+                # Never block anything from Cloudflare or xAI/Grok domains (needed for Turnstile proof-of-work)
+                if any(domain in url for domain in ["cloudflare.com", "x.ai", "grok.com", "auth.x.ai"]):
+                    route.continue_()
+                    return
+
+                if req.resource_type in ["media"]:
+                    route.abort()
+                    return
+                if any(t in url for t in ["google-analytics", "doubleclick", "datadoghq", "sentry.io", "segment.io", "intercom"]):
+                    route.abort()
+                    return
+                route.continue_()
+
+            self.page.route("**/*", _route_filter)
+        except Exception:
+            pass
 
         def on_response(response: Response):
             try:
@@ -143,12 +170,38 @@ class StealthEngine:
                         self.captured_cookies["sso_redirect_token"] = q_token
 
                 if "x.ai" in url or "grok.com" in url or "grokusercontent.com" in url or "grokipedia.com" in url:
+                    headers = {}
                     try:
                         headers = response.all_headers() if hasattr(response, "all_headers") else response.headers
                     except Exception:
                         headers = response.headers
 
-                    # Check Set-Cookie headers
+                    # Parse all Set-Cookie headers precisely via headers_array
+                    headers_array = []
+                    try:
+                        if hasattr(response, "headers_array"):
+                            headers_array = response.headers_array()
+                    except Exception:
+                        pass
+
+                    if headers_array:
+                        for h in headers_array:
+                            if h.get("name", "").lower() == "set-cookie":
+                                part = h.get("value", "")
+                                if "sso=" in part:
+                                    m = re.search(r"sso=([^;,\s]+)", part)
+                                    if m:
+                                        self.captured_cookies["sso"] = m.group(1)
+                                if "sso-rw=" in part:
+                                    m = re.search(r"sso-rw=([^;,\s]+)", part)
+                                    if m:
+                                        self.captured_cookies["sso-rw"] = m.group(1)
+                                if "x-userid=" in part:
+                                    m = re.search(r"x-userid=([^;,\s]+)", part)
+                                    if m:
+                                        self.captured_cookies["x-userid"] = m.group(1)
+
+                    # Fallback check on string Set-Cookie
                     set_cookie = headers.get("set-cookie", "")
                     if set_cookie:
                         for part in re.split(r"[\n\r]+", set_cookie):

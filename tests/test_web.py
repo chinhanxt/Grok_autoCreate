@@ -135,9 +135,16 @@ class _FakeTempMail:
 
     def __init__(self, **kwargs):
         self.token = None
+        self.email = None
 
-    def set_token(self, token):
+    def create_inbox(self):
+        self.email = "test@tempmail.org"
+        self.token = "fake_jwt"
+        return self.email, self.token
+
+    def set_token(self, token, email=None):
         self.token = token
+        self.email = email
 
     def fetch_otp_code(self, timeout_sec=120, page=None):
         return "123456"
@@ -220,3 +227,59 @@ def test_single_thread_tempmail_uses_inline_pool_no_precreate(monkeypatch):
     assert created[0]["count"] == 1
     assert sess["success_count"] == 1
     assert sess["status"] == "success"
+
+
+def test_decoupled_mode_uses_tor_for_tempmail_and_proxyxoay_for_xai(monkeypatch):
+    """Decoupled mode routes TempMail via Tor stream isolation and xAI via ProxyXoay."""
+    created_pools = []
+    created_engines = []
+
+    class _RecordingEngine(_FakeEngine):
+        def __init__(self, proxy=None, **kwargs):
+            created_engines.append(proxy)
+
+    def _recording_pool(**kwargs):
+        created_pools.append(kwargs)
+        return _InlinePool(**kwargs)
+
+    monkeypatch.setattr("web.server.MailboxPool", _recording_pool)
+    monkeypatch.setattr("web.server.StealthEngine", _RecordingEngine)
+    monkeypatch.setattr("web.server.AccountCreator", _FakeCreator)
+    monkeypatch.setattr("web.server.TempMailClient", _FakeTempMail)
+    monkeypatch.setattr("web.server.save_account", lambda *a, **k: None)
+    monkeypatch.setattr(
+        "web.server.TorProxyManager.check_connection",
+        lambda self, timeout_sec=8: (True, "185.220.101.1", {"country": "DE"}),
+    )
+    monkeypatch.setattr(
+        "web.server.ProxyXoayManager.get_proxy",
+        lambda self, force_rotate=False, timeout_sec=10: (True, "http://103.1.1.1:8080", {"ip": "103.1.1.1", "status": 100}),
+    )
+
+    req = SignupRequest(
+        use_tempmail=True,
+        count=1,
+        threads=1,
+        proxy_mode="decoupled",
+        rotating_proxy_key="test_key",
+        use_tor=True,
+    )
+    sess = _make_session(count=1)
+    SESSIONS["test-decoupled"] = sess
+    try:
+        _run_account_creation_worker("test-decoupled", req)
+    finally:
+        SESSIONS.pop("test-decoupled", None)
+
+    assert sess["success_count"] == 1
+    assert sess["status"] == "success"
+    # TempMail pool got Tor manager
+    assert len(created_pools) == 1
+    assert created_pools[0]["proxy_mgr"] is not None
+    assert "TorProxyManager" in type(created_pools[0]["proxy_mgr"]).__name__
+    # xAI StealthEngine got ProxyXoay
+    assert len(created_engines) == 1
+    assert created_engines[0] == "http://103.1.1.1:8080"
+    logs = "\n".join(sess["logs"])
+    assert "Proxy Dân Cư (xAI)" in logs
+    assert "Stream Isolation" in logs

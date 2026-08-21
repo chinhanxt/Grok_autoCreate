@@ -20,6 +20,17 @@ def main():
 
     args = parser.parse_args()
 
+    # Add project root to sys.path
+    project_root = os.path.dirname(os.path.abspath(__file__))
+    if project_root not in sys.path:
+        sys.path.insert(0, project_root)
+
+    try:
+        from core.tor_launcher import ensure_local_tors
+        ensure_local_tors()
+    except Exception as exc:
+        console.print(f"[bold yellow]⚠ Tor chưa online:[/bold yellow] {exc}")
+
     url = f"http://{args.host}:{args.port}"
     console.print(Panel(
         f"[bold cyan]⚡ Grok & x.ai Account Creator Web Dashboard ⚡[/bold cyan]\n\n"
@@ -27,11 +38,6 @@ def main():
         f"[dim]Powered by FastAPI & Scrapling Stealth Camoufox Engine[/dim]",
         border_style="cyan"
     ))
-
-    # Add project root to sys.path
-    project_root = os.path.dirname(os.path.abspath(__file__))
-    if project_root not in sys.path:
-        sys.path.insert(0, project_root)
 
     uvicorn.run(
         "web.server:app",

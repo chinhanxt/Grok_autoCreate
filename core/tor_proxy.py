@@ -43,6 +43,46 @@ class TorProxyManager:
         """Returns standard SOCKS5 proxy URL format."""
         return f"socks5://{self.socks_host}:{self.socks_port}"
 
+    def get_isolated_proxy_url(self, stream_id: Optional[str] = None) -> str:
+        """
+        Returns SOCKS5 proxy URL with stream isolation credentials.
+        Tor uses SOCKS authentication credentials (IsolateSOCKSAuth) to route
+        each stream through an independent circuit and exit node IP.
+        """
+        if stream_id:
+            return f"socks5://{stream_id}:tor@{self.socks_host}:{self.socks_port}"
+        return self.proxy_url
+
+    def get_proxy(
+        self,
+        force_rotate: bool = False,
+        timeout_sec: int = 10,
+        stream_id: Optional[str] = None
+    ) -> Tuple[bool, Optional[str], Dict[str, Any]]:
+        """
+        Retrieves a proxy URL, optionally with Tor stream isolation or circuit renewal.
+        Matches the ProxyManager interface expected by MailboxPool.
+        """
+        if stream_id:
+            url = self.get_isolated_proxy_url(stream_id)
+            return True, url, {"proxy": url, "stream_id": stream_id, "type": "tor_isolated"}
+        
+        if force_rotate:
+            ok, new_ip = self.renew_ip(wait_sec=2.0)
+            return ok, self.proxy_url, {"ip": new_ip, "proxy": self.proxy_url, "type": "tor"}
+
+        return True, self.proxy_url, {"ip": self.last_ip, "proxy": self.proxy_url, "type": "tor"}
+
+    def rotate_to_new_ip(self, timeout_sec: int = 30) -> Tuple[bool, Optional[str], Dict[str, Any]]:
+        """
+        Rotates to a new Tor circuit / exit IP (matches MailboxPool rotation interface).
+        Generates a fresh isolated stream ID for instant rotation without blocking cooldowns.
+        """
+        import random
+        stream_id = f"tor_rot_{int(time.time() * 1000)}_{random.randint(1000, 9999)}"
+        url = self.get_isolated_proxy_url(stream_id)
+        return True, url, {"proxy": url, "stream_id": stream_id, "type": "tor_isolated"}
+
     def check_connection(self, timeout_sec: int = 6) -> Tuple[bool, Optional[str], Optional[Dict[str, Any]]]:
         """
         Checks if Tor SOCKS5 proxy is online and retrieves the current exit node IP & country.
