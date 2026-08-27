@@ -57,6 +57,9 @@ def main():
             page.context.add_cookies(cookies)
             tokens = oauth_mgr.mint_tokens_for_page(page, proxy=proxy)
             
+            from core.healthcheck import verify_grok_cli_health
+            is_healthy, h_code, h_msg = verify_grok_cli_health(tokens["access_token"], proxy=proxy)
+            
             rec = AccountRecord(
                 email=email,
                 password=acc.get("password", "taikhoanAI123"),
@@ -67,12 +70,15 @@ def main():
                 sso_cookie=sso,
                 sso_rw_cookie=sso_rw,
                 access_token=tokens["access_token"],
-                refresh_token=tokens["refresh_token"]
+                refresh_token=tokens["refresh_token"],
+                status="active" if is_healthy else "created",
+                extra={"health_verified": is_healthy, "health_status": h_msg}
             )
             save_account(rec, DEFAULT_JSON_OUTPUT, DEFAULT_TXT_OUTPUT)
             with lock:
                 success_count += 1
-                print(f"✔ [{success_count + failed_count}/{total_pending}] THÀNH CÔNG: {email} -> OAuth Token cấp OK!")
+                h_badge = "100% SỐNG (HTTP 200)" if is_healthy else f"Chưa đạt ping: {h_msg}"
+                print(f"✔ [{success_count + failed_count}/{total_pending}] THÀNH CÔNG: {email} -> OAuth cấp OK [{h_badge}]")
         except Exception as e:
             with lock:
                 failed_count += 1
@@ -84,7 +90,10 @@ def main():
     with ThreadPoolExecutor(max_workers=4) as executor:
         list(executor.map(sync_account, items))
 
+    from core.exporter import save_oauth_router_accounts
+    exported = save_oauth_router_accounts("grok_router_accounts.json", json_path=DEFAULT_JSON_OUTPUT)
     print(f"\n=== HOÀN TẤT ĐỒNG BỘ: Thành công {success_count}/{total_pending} (Thất bại: {failed_count}) ===")
+    print(f"🎉 Đã xuất {exported} tài khoản theo chuẩn Router ra file 'grok_router_accounts.json'!")
 
 if __name__ == "__main__":
     main()

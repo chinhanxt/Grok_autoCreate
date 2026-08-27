@@ -16,7 +16,7 @@ logger = logging.getLogger("batch_creator")
 
 PROXYXOAY_KEY = "HVnSXrEVXRSrUYBkwYzuId"
 TARGET_ACCOUNTS = 20
-CONCURRENT_WORKERS = 4
+CONCURRENT_WORKERS = 20
 JSON_PATH = "/home/chinhan/xai-grok-account-creator/accounts.json"
 TXT_PATH = "/home/chinhan/xai-grok-account-creator/accounts.txt"
 

@@ -61,6 +61,16 @@ app.add_middleware(
 # Active creation sessions
 SESSIONS: Dict[str, Dict[str, Any]] = {}
 
+from core.reviver import AccountReviveManager
+
+REVIVER = AccountReviveManager(DEFAULT_JSON_OUTPUT, DEFAULT_TXT_OUTPUT)
+
+class ReviveRequest(BaseModel):
+    threads: int = 4
+    proxy_mode: str = "rotating"
+    rotating_proxy_key: Optional[str] = DEFAULT_PROXYXOAY_KEY
+    custom_proxy: Optional[str] = None
+
 
 class SignupRequest(BaseModel):
     email: Optional[str] = None
@@ -74,7 +84,7 @@ class SignupRequest(BaseModel):
     random_name: bool = True
     name_prefix: Optional[str] = DEFAULT_NAME_PREFIX
     # Concurrency / Multi-threading
-    threads: int = 1
+    threads: int = 20
     # Proxy mode: "decoupled" (ProxyXoay for xAI + Tor for TempMail), "rotating", "tor", "direct"
     proxy_mode: str = "decoupled"
     use_tor: bool = False
@@ -216,7 +226,9 @@ def export_oauth_json():
       {
         "email": "...",
         "access_token": "...",
-        "refresh_token": "..."
+        "refresh_token": "...",
+        "sso_cookie": "...",
+        "sso_rw_cookie": "..."
       }
     ]
     """
@@ -226,6 +238,89 @@ def export_oauth_json():
         content=oauth_data,
         headers={"Content-Disposition": "attachment; filename=grok_oauth_tokens.json"}
     )
+
+
+@app.get("/api/accounts/health-check")
+@app.post("/api/accounts/health-check")
+@app.get("/api/accounts/check-health")
+@app.post("/api/accounts/check-health")
+def check_all_accounts_health():
+    """
+    Performs live grok-4.6 health-checks across all accounts in accounts.json.
+    """
+    from core.healthcheck import check_account_health_with_auto_refresh
+    accounts = load_accounts(DEFAULT_JSON_OUTPUT)
+    results = []
+    live_count = 0
+    dead_count = 0
+
+    for acc in accounts:
+        ok, code, msg, updated = check_account_health_with_auto_refresh(acc)
+        if ok:
+            live_count += 1
+        else:
+            dead_count += 1
+        results.append({
+            "email": acc.get("email"),
+            "status": "healthy" if ok else "dead",
+            "http_code": code,
+            "message": msg,
+            "has_token": bool(acc.get("access_token")),
+            "has_sso": bool(acc.get("sso_cookie"))
+        })
+
+    return {
+        "total": len(accounts),
+        "live_count": live_count,
+        "dead_count": dead_count,
+        "results": results
+    }
+
+
+@app.post("/api/accounts/revive")
+def start_revival(req: ReviveRequest = ReviveRequest()):
+    """
+    Starts background worker to resurrect all expired/dead accounts in accounts.json.
+    """
+    if REVIVER.is_running:
+        return {"status": "already_running", "message": "Tiến trình hồi sinh tài khoản đang hoạt động!", "status_data": REVIVER.get_status()}
+
+    effective_proxy = req.custom_proxy
+    if not effective_proxy and req.proxy_mode == "rotating" and req.rotating_proxy_key:
+        try:
+            px = ProxyXoayManager(api_key=req.rotating_proxy_key)
+            ok, p_url, _ = px.get_proxy()
+            if ok and p_url:
+                effective_proxy = p_url
+        except Exception:
+            pass
+
+    threads = max(1, min(req.threads, 50))
+    t = threading.Thread(
+        target=REVIVER.run_revival,
+        kwargs={"max_workers": threads, "proxy": effective_proxy},
+        daemon=True,
+        name="AccountReviveWorker"
+    )
+    t.start()
+    return {"status": "started", "message": f"Đã kích hoạt tiến trình làm sống lại toàn bộ tài khoản với {threads} luồng!"}
+
+
+@app.get("/api/accounts/revive/status")
+def get_revival_status():
+    """
+    Returns realtime progress, processed count, alive count, and logs of the reviver.
+    """
+    return REVIVER.get_status()
+
+
+@app.post("/api/accounts/revive/stop")
+def stop_revival():
+    """
+    Stops the background revival process cleanly.
+    """
+    REVIVER.stop()
+    return {"status": "stopped", "message": "Đã gửi tín hiệu dừng tiến trình hồi sinh."}
 
 
 @app.post("/api/sync-oauth")
@@ -386,7 +481,7 @@ def _run_account_creation_worker(task_id: str, req: SignupRequest):
         xai_active_proxy = None
         sess["logs"].append("Trình duyệt x.ai: Kết nối Trực tiếp (Direct Mode - Tránh lỗi Tor Region Block).")
 
-    num_threads = min(max(1, req.threads or 1), 10)
+    num_threads = min(max(1, req.threads or 1), 50)
     sess["threads"] = num_threads
     sess["start_time"] = time.time()
     sess["thread_states"] = {
@@ -506,9 +601,10 @@ def _run_account_creation_worker(task_id: str, req: SignupRequest):
                     for mb_try in range(3):
                         try:
                             worker_tor_proxy = None
-                            if tempmail_active_proxy and "9050" in tempmail_active_proxy:
+                            if tempmail_active_proxy and ("9050" in tempmail_active_proxy or "9052" in tempmail_active_proxy):
                                 rnd_id = random.randint(10000, 99999)
-                                worker_tor_proxy = f"socks5://tw_{wid}_{rnd_id}:pwd_{rnd_id}@127.0.0.1:{req.tor_socks_port}"
+                                tor_p = 9052 if (wid % 2 == 0) else req.tor_socks_port
+                                worker_tor_proxy = f"socks5://tw_{wid}_{rnd_id}:pwd_{rnd_id}@127.0.0.1:{tor_p}"
                             tempmail_client = TempMailClient(proxy=worker_tor_proxy or tempmail_active_proxy)
                             email, token = tempmail_client.create_inbox()
                             break
@@ -555,9 +651,10 @@ def _run_account_creation_worker(task_id: str, req: SignupRequest):
                     if not fresh_email:
                         try:
                             worker_tor_proxy = None
-                            if tempmail_active_proxy and "9050" in tempmail_active_proxy:
+                            if tempmail_active_proxy and ("9050" in tempmail_active_proxy or "9052" in tempmail_active_proxy):
                                 rnd_id = random.randint(10000, 99999)
-                                worker_tor_proxy = f"socks5://tw_{wid}_{rnd_id}:pwd_{rnd_id}@127.0.0.1:{req.tor_socks_port}"
+                                tor_p = 9052 if (wid % 2 == 0) else req.tor_socks_port
+                                worker_tor_proxy = f"socks5://tw_{wid}_{rnd_id}:pwd_{rnd_id}@127.0.0.1:{tor_p}"
                             tempmail_client = TempMailClient(proxy=worker_tor_proxy or tempmail_active_proxy)
                             fresh_email, _ = tempmail_client.create_inbox()
                         except Exception:
@@ -670,7 +767,7 @@ def _run_account_creation_worker(task_id: str, req: SignupRequest):
 def start_signup(req: SignupRequest):
     task_id = str(uuid.uuid4())
     total_count = max(1, req.count or 1)
-    num_threads = min(max(1, req.threads or 1), 10)
+    num_threads = min(max(1, req.threads or 1), 50)
     SESSIONS[task_id] = {
         "id": task_id,
         "status": "pending",

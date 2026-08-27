@@ -3,7 +3,13 @@ __pycache__/
 *.pyc
 *.log
 .pytest_cache/
-accounts.json
-accounts.txt
+accounts*.json
+accounts*.txt
+grok_router_accounts*.json
+.proxyxoay_cache.json
 vendor/
 .run/
+.superpowers/
+debug_run/
+debug_steps/
+*.png

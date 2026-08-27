@@ -532,6 +532,8 @@ class AccountCreator:
         # Mint official xAI / Grok CLI OAuth 2.0 Tokens (at+jwt)
         access_token = ""
         refresh_token = ""
+        is_healthy = False
+        health_msg = ""
         time.sleep(1.0)
         try:
             from core.oauth import OAuthTokenManager
@@ -549,6 +551,23 @@ class AccountCreator:
         if not access_token and sso_cookie and sso_cookie.startswith("eyJ"):
             access_token = sso_cookie
 
+        # 6. Run automated health-check with grok-4.6 before committing account
+        if access_token:
+            try:
+                from core.healthcheck import verify_grok_cli_health
+                is_healthy, h_code, health_msg = verify_grok_cli_health(access_token, proxy=self.engine.proxy)
+                if is_healthy:
+                    logger.info("🎉 Health-check PASSED (HTTP 200 OK) with grok-4.6! Tài khoản sống 100%.")
+                else:
+                    logger.warning(f"⚠ Health-check ping failed (HTTP {h_code}): {health_msg}")
+            except Exception as e:
+                logger.warning(f"Health-check exception: {e}")
+
+        extra_data = {"session_details": session_data} if session_data else {}
+        extra_data["health_verified"] = is_healthy
+        if health_msg:
+            extra_data["health_status"] = health_msg
+
         record = AccountRecord(
             email=self.email or "",
             password=self.password or "",
@@ -560,8 +579,8 @@ class AccountCreator:
             sso_rw_cookie=sso_rw_cookie,
             access_token=access_token,
             refresh_token=refresh_token,
-            status="active" if (sso_cookie or user_id or access_token or "grok.com" in self.page.url) else "created",
-            extra={"session_details": session_data} if session_data else {}
+            status="active" if is_healthy or (sso_cookie or user_id or access_token or "grok.com" in self.page.url) else "created",
+            extra=extra_data
         )
 
         return record

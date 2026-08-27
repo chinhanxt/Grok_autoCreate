@@ -21,7 +21,8 @@ from core.engine import StealthEngine
 from core.auth import AccountCreator
 from core.tempmail import TempMailClient
 from core.mailbox_pool import MailboxPool, MailboxEntry
-from core.exporter import AccountRecord, save_account, load_accounts
+from core.exporter import AccountRecord, save_account, load_accounts, save_oauth_router_accounts, load_oauth_accounts
+from core.healthcheck import verify_grok_cli_health, check_account_health_with_auto_refresh
 from core.tor_proxy import TorProxyManager
 from core.proxyxoay import ProxyXoayManager
 from config import (
@@ -144,12 +145,15 @@ def create_single_account(
 
         # 5. Save and Export
         save_account(record, json_path=json_path, txt_path=txt_path)
+        is_healthy = record.extra.get("health_verified", False)
+        health_badge = "[bold green]100% ALIVE (HTTP 200 grok-4.6)[/bold green]" if is_healthy else "[yellow]Unverified / Ping Check Pending[/yellow]"
         console.print(Panel(
             f"[bold green]✔ Account Created Successfully![/bold green]\n\n"
             f"[bold]Email:[/bold] {record.email}\n"
             f"[bold]Password:[/bold] {record.password}\n"
             f"[bold]User ID:[/bold] {record.user_id}\n"
             f"[bold]Session ID:[/bold] {record.session_id}\n"
+            f"[bold]Health Status:[/bold] {health_badge}\n"
             f"[bold]SSO Cookie:[/bold] {record.sso_cookie[:40]}... (saved in full)\n"
             f"[bold]Saved To:[/bold] {json_path} and {txt_path}",
             title="[bold green]Success[/bold green]",
@@ -187,11 +191,63 @@ def main():
     parser.add_argument("--headful", action="store_true", help="Run with visible browser window (default: headless)")
     parser.add_argument("--output-json", type=str, default=DEFAULT_JSON_OUTPUT, help="Path for JSON accounts output")
     parser.add_argument("--output-txt", type=str, default=DEFAULT_TXT_OUTPUT, help="Path for TXT accounts output")
+    parser.add_argument("--export-router", type=str, nargs="?", const="grok_router_accounts.json", default=None, help="Export 5-field JSON for Grok Routers (default: grok_router_accounts.json)")
+    parser.add_argument("--check-health", action="store_true", help="Ping and verify health of all saved accounts using grok-4.6 completions API")
+    parser.add_argument("--revive", action="store_true", help="Resurrect all dead/expired accounts in accounts.json using SSO/Refresh/Password recovery")
     parser.add_argument("--list", "-l", action="store_true", help="List all saved accounts")
     parser.add_argument("--count", "-c", type=int, default=1, help="Number of accounts to create (batch loop mode)")
     parser.add_argument("--threads", "-j", type=int, default=1, help="Number of concurrent threads (default: 1, e.g. 3 or 5)")
 
     args = parser.parse_args()
+
+    # Revive dead accounts
+    if args.revive:
+        from core.reviver import AccountReviveManager
+        reviver = AccountReviveManager(json_path=args.output_json, txt_path=args.output_txt)
+        num_threads = min(max(1, args.threads), 50)
+        console.print(f"[bold cyan]🚀 Bắt đầu tiến trình HỒI SINH toàn bộ tài khoản với {num_threads} luồng...[/bold cyan]")
+        reviver.run_revival(max_workers=num_threads, proxy=xai_active_proxy)
+        for log in reviver.logs:
+            if "✔" in log:
+                console.print(f"[green]{log}[/green]")
+            elif "✘" in log:
+                console.print(f"[red]{log}[/red]")
+            else:
+                console.print(f"[cyan]{log}[/cyan]")
+        return
+
+    # Export 5-field Router JSON
+    if args.export_router:
+        count = save_oauth_router_accounts(args.export_router, json_path=args.output_json)
+        console.print(f"[bold green]✔ Đã xuất {count} tài khoản theo chuẩn Router (5 trường: email, access_token, refresh_token, sso_cookie, sso_rw_cookie) ra file: [bold yellow]{args.export_router}[/bold yellow][/bold green]")
+        return
+
+    # Check Health of existing accounts
+    if args.check_health:
+        accounts = load_accounts(json_path=args.output_json)
+        if not accounts:
+            console.print("[yellow]Không tìm thấy tài khoản nào trong file accounts.json[/yellow]")
+            return
+        console.print(f"[bold cyan]🔍 Đang kiểm tra sức khoẻ cho {len(accounts)} tài khoản với model grok-4.6...[/bold cyan]")
+        table = Table(title=f"Báo cáo sức khoẻ tài khoản Grok ({len(accounts)} tài khoản)")
+        table.add_column("Email", style="cyan")
+        table.add_column("OAuth Token", style="magenta")
+        table.add_column("HTTP Code", style="yellow")
+        table.add_column("Trạng thái", style="bold green")
+
+        live_count = 0
+        for acc in accounts:
+            ok, code, msg, updated = check_account_health_with_auto_refresh(acc)
+            if ok:
+                live_count += 1
+                st_text = "[bold green]100% SỐNG (HTTP 200)[/bold green]"
+            else:
+                st_text = f"[bold red]CHẾT / 401 ({code})[/bold red]"
+            tok_preview = (acc.get("access_token") or "")[:20] + "..." if acc.get("access_token") else "[dim]Chưa có[/dim]"
+            table.add_row(acc.get("email", ""), tok_preview, str(code), st_text)
+        console.print(table)
+        console.print(f"\n[bold green]📊 Tổng kết: {live_count}/{len(accounts)} tài khoản SỐNG 100% và sẵn sàng nạp vào Router.[/bold green]")
+        return
 
     # List saved accounts
     if args.list:
@@ -267,7 +323,7 @@ def main():
         border_style="cyan"
     ))
 
-    num_threads = min(max(1, args.threads), 10)
+    num_threads = min(max(1, args.threads), 50)
     if num_threads > 1 and args.count > 1:
         console.print(f"[bold green]⚡ High-Speed Multi-Threading Mode: {num_threads} Concurrent Threads active![/bold green]")
 

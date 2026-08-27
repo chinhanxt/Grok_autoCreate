@@ -44,3 +44,6 @@ def test_cli_help_decoupled_proxy_options():
     assert "--xai-proxy" in result.stdout
     assert "--tempmail-proxy" in result.stdout
     assert "--tempmail-tor" in result.stdout
+    assert "--export-router" in result.stdout
+    assert "--check-health" in result.stdout
+

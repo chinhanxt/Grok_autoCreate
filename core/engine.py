@@ -98,9 +98,19 @@ class StealthEngine:
                 return self.page
             except Exception as e:
                 logger.warning(f"Camoufox launch failed ({e}), falling back to Patchright/Playwright...")
+                try:
+                    if hasattr(self, "camoufox_cm") and self.camoufox_cm:
+                        self.camoufox_cm.__exit__(None, None, None)
+                except Exception:
+                    pass
                 self.browser = None
                 self.context = None
                 self.page = None
+                import asyncio
+                try:
+                    asyncio.set_event_loop(asyncio.new_event_loop())
+                except Exception:
+                    pass
 
         # 2. Fallback to Patchright or Playwright Stealth
         launcher = sync_patchright if USE_PATCHRIGHT else sync_playwright
@@ -147,10 +157,13 @@ class StealthEngine:
                     route.continue_()
                     return
 
-                if req.resource_type in ["media"]:
+                if req.resource_type in ["media", "font"]:
                     route.abort()
                     return
-                if any(t in url for t in ["google-analytics", "doubleclick", "datadoghq", "sentry.io", "segment.io", "intercom"]):
+                if req.resource_type == "image" and not any(d in url for d in ["challenges.cloudflare.com", "cloudflare.com", "turnstile", "x.ai", "grok.com"]):
+                    route.abort()
+                    return
+                if any(t in url for t in ["google-analytics", "googletagmanager", "doubleclick", "datadoghq", "sentry.io", "segment.io", "intercom", "facebook.net", "tiktok.com", "onetrust.com", "geolocation.onetrust"]):
                     route.abort()
                     return
                 route.continue_()

@@ -1240,3 +1240,227 @@ async function syncAllOAuthTokens() {
     }
   }
 }
+
+let reviveTimerInterval = null;
+let reviveStartTime = null;
+
+function openReviveModal() {
+  const modal = document.getElementById("reviveModal");
+  if (modal) modal.style.display = "flex";
+}
+
+function closeReviveModal() {
+  const modal = document.getElementById("reviveModal");
+  if (modal) modal.style.display = "none";
+}
+
+function handleReviveBackdropClick(e) {
+  if (e.target.id === "reviveModal") closeReviveModal();
+}
+
+function openPingModal() {
+  const modal = document.getElementById("pingModal");
+  if (modal) modal.style.display = "flex";
+}
+
+function closePingModal() {
+  const modal = document.getElementById("pingModal");
+  if (modal) modal.style.display = "none";
+}
+
+function handlePingBackdropClick(e) {
+  if (e.target.id === "pingModal") closePingModal();
+}
+
+async function stopReviveDeadAccounts() {
+  try {
+    const res = await fetch("/api/accounts/revive/stop", { method: "POST" });
+    const data = await res.json();
+    showToast(data.message || "Đã gửi yêu cầu dừng.", "warning");
+    const stopBtn = document.getElementById("btnStopReviveModal");
+    if (stopBtn) {
+      stopBtn.disabled = true;
+      stopBtn.textContent = "⏳ ĐANG DỪNG...";
+    }
+  } catch (e) {
+    showToast("Lỗi dừng: " + e.message, "error");
+  }
+}
+
+async function startReviveDeadAccounts() {
+  const btn = document.getElementById("btnReviveAccounts");
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = "⏳ ĐANG HỒI SINH...";
+  }
+
+  // Reset & open popup modal immediately
+  openReviveModal();
+  const stopBtn = document.getElementById("btnStopReviveModal");
+  if (stopBtn) {
+    stopBtn.disabled = false;
+    stopBtn.textContent = "🛑 DỪNG LẠI";
+  }
+  document.getElementById("reviveTotalAcc").innerText = "...";
+  document.getElementById("reviveLiveAcc").innerText = "0";
+  document.getElementById("reviveDeadAcc").innerText = "0";
+  document.getElementById("reviveCurrentEmail").innerText = "Đang kết nối...";
+  document.getElementById("reviveProgressBar").style.width = "0%";
+  document.getElementById("reviveProgressPercent").innerText = "0%";
+  document.getElementById("reviveProgressStatus").innerText = "Đang khởi động...";
+  document.getElementById("reviveLogsStream").innerHTML = '<div class="revive-log-line info">🚀 Bắt đầu tiến trình hồi sinh đa tầng (OAuth Refresh ➔ SSO Minting ➔ Password Login ➔ grok-4.6 Ping)...</div>';
+
+  if (reviveTimerInterval) clearInterval(reviveTimerInterval);
+  reviveStartTime = Date.now();
+  const timerBadge = document.getElementById("reviveTimerBadge");
+  reviveTimerInterval = setInterval(() => {
+    if (!reviveStartTime || !timerBadge) return;
+    const elapsed = Math.floor((Date.now() - reviveStartTime) / 1000);
+    const m = String(Math.floor(elapsed / 60)).padStart(2, "0");
+    const s = String(elapsed % 60).padStart(2, "0");
+    timerBadge.innerText = `⏱ ${m}:${s}`;
+  }, 1000);
+
+  logMessage("🚀 Bắt đầu tiến trình HỒI SINH toàn bộ tài khoản chết qua SSO Cookie & OAuth Refresh...", "HỆ THỐNG");
+  showToast("Đang kích hoạt tiến trình làm sống lại toàn bộ tài khoản...", "info");
+
+  try {
+    const threadCount = parseInt(document.getElementById("threadCount")?.value) || 5;
+    const res = await fetch("/api/accounts/revive", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        threads: threadCount,
+        proxy_mode: "rotating",
+        rotating_proxy_key: "HVnSXrEVXRSrUYBkwYzuId"
+      })
+    });
+    const data = await res.json();
+    showToast(data.message || "Đã khởi chạy tiến trình hồi sinh!", "success");
+
+    let lastLogIndex = 0;
+    const logsBox = document.getElementById("reviveLogsStream");
+
+    const pollTimer = setInterval(async () => {
+      try {
+        const sRes = await fetch("/api/accounts/revive/status");
+        const status = await sRes.json();
+
+        // Update modal metrics
+        if (status.total > 0) {
+          document.getElementById("reviveTotalAcc").innerText = status.total;
+        }
+        document.getElementById("reviveLiveAcc").innerText = status.revived_count;
+        document.getElementById("reviveDeadAcc").innerText = status.failed_count;
+        document.getElementById("reviveCurrentEmail").innerText = status.current_email || "--";
+        document.getElementById("reviveProgressBadge").innerText = `${status.processed}/${status.total}`;
+
+        const pct = status.total > 0 ? Math.min(100, Math.round((status.processed / status.total) * 100)) : 0;
+        document.getElementById("reviveProgressPercent").innerText = `${pct}%`;
+        document.getElementById("reviveProgressBar").style.width = `${pct}%`;
+        document.getElementById("reviveProgressStatus").innerText = `Đã xử lý ${status.processed}/${status.total} tài khoản`;
+
+        if (btn) {
+          btn.textContent = `⏳ HỒI SINH (${status.processed}/${status.total} - Sống: ${status.revived_count})...`;
+        }
+
+        // Render stream logs in modal and console
+        if (status.logs && status.logs.length > lastLogIndex) {
+          for (let i = lastLogIndex; i < status.logs.length; i++) {
+            const rawLog = status.logs[i];
+            logMessage(rawLog, "HỒI SINH");
+
+            if (logsBox) {
+              const line = document.createElement("div");
+              line.className = "revive-log-line " + (rawLog.includes("✔") ? "ok" : rawLog.includes("✘") ? "err" : "info");
+              line.innerText = rawLog;
+              logsBox.appendChild(line);
+              if (logsBox.children.length > 150) {
+                logsBox.removeChild(logsBox.firstElementChild);
+              }
+              logsBox.scrollTop = logsBox.scrollHeight;
+            }
+          }
+          lastLogIndex = status.logs.length;
+        }
+
+        if (!status.is_running && status.processed > 0) {
+          clearInterval(pollTimer);
+          if (reviveTimerInterval) clearInterval(reviveTimerInterval);
+          if (btn) {
+            btn.disabled = false;
+            btn.textContent = "⚡ HỒI SINH";
+          }
+          await loadAccounts();
+          showToast(`Hoàn tất hồi sinh! ${status.revived_count}/${status.total} tài khoản đã SỐNG 100%!`, "success");
+          logMessage(`🏁 Hoàn tất: Đã hồi sinh thành công ${status.revived_count}/${status.total} tài khoản!`, "THÀNH CÔNG");
+          
+          if (logsBox) {
+            const endLine = document.createElement("div");
+            endLine.className = "revive-log-line ok";
+            endLine.innerHTML = `<strong>🏁 ĐÃ HOÀN TẤT!</strong> Thành công hồi sinh <strong>${status.revived_count}/${status.total}</strong> tài khoản sống 100%. File chuẩn Router đã sẵn sàng tải!`;
+            logsBox.appendChild(endLine);
+            logsBox.scrollTop = logsBox.scrollHeight;
+          }
+        }
+      } catch (e) {}
+    }, 1500);
+  } catch (err) {
+    showToast("Lỗi khởi chạy hồi sinh: " + err.message, "error");
+    if (btn) {
+      btn.disabled = false;
+      btn.textContent = "⚡ HỒI SINH";
+    }
+  }
+}
+
+async function runHealthCheckScan() {
+  const btn = document.getElementById("btnHealthCheck");
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = "⏳ ĐANG PING...";
+  }
+
+  openPingModal();
+  document.getElementById("pingTotalAcc").innerText = "...";
+  document.getElementById("pingLiveAcc").innerText = "...";
+  document.getElementById("pingDeadAcc").innerText = "...";
+  document.getElementById("pingResultsList").innerHTML = '<div class="revive-log-line info">⏳ Đang gửi test ping grok-4.6 tới toàn bộ tài khoản (HTTP POST /v1/chat/completions)...</div>';
+
+  showToast("Đang gửi test ping grok-4.6 tới toàn bộ tài khoản...", "info");
+  logMessage("🔍 Bắt đầu kiểm tra sức khoẻ (Ping test grok-4.6)...", "HỆ THỐNG");
+
+  try {
+    const res = await fetch("/api/accounts/health-check");
+    const data = await res.json();
+    
+    document.getElementById("pingTotalAcc").innerText = data.total;
+    document.getElementById("pingLiveAcc").innerText = data.live_count;
+    document.getElementById("pingDeadAcc").innerText = data.dead_count;
+
+    const listEl = document.getElementById("pingResultsList");
+    if (listEl) {
+      listEl.innerHTML = "";
+      (data.results || []).forEach(r => {
+        const row = document.createElement("div");
+        row.className = "revive-log-line " + (r.status === "healthy" ? "ok" : "err");
+        row.innerHTML = `${r.status === "healthy" ? "🟢" : "🔴"} <strong>${escapeHtml(r.email)}</strong> ➔ ${r.status === "healthy" ? "SỐNG 100% (HTTP 200 OK)" : "CHẾT / 401 (" + r.message + ")"}`;
+        listEl.appendChild(row);
+      });
+      listEl.scrollTop = 0;
+    }
+
+    logMessage(`📊 Kết quả Ping: ${data.live_count} SỐNG (HTTP 200) / ${data.dead_count} CHẾT trên tổng ${data.total} tài khoản.`, "THÔNG TIN");
+    showToast(`Đã kiểm tra xong: ${data.live_count} sống / ${data.dead_count} chết`, data.live_count > 0 ? "success" : "warning");
+    await loadAccounts();
+  } catch (err) {
+    showToast("Lỗi kiểm tra sức khoẻ: " + err.message, "error");
+    document.getElementById("pingResultsList").innerHTML = `<div class="revive-log-line err">Lỗi kiểm tra: ${escapeHtml(err.message)}</div>`;
+  } finally {
+    if (btn) {
+      btn.disabled = false;
+      btn.textContent = "🩺 CHECK PING";
+    }
+  }
+}
+

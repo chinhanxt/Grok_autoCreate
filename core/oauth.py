@@ -250,6 +250,12 @@ def start_auto_oauth_daemon(interval_sec: float = 3.0, max_workers: int = 2):
                 page.context.add_cookies(cookies)
                 tokens = oauth_mgr.mint_tokens_for_page(page)
                 
+                from core.healthcheck import verify_grok_cli_health
+                is_healthy, h_code, h_msg = verify_grok_cli_health(tokens.get("access_token", ""))
+                extra_data = acc.get("extra", {}) or {}
+                extra_data["health_verified"] = is_healthy
+                extra_data["health_status"] = h_msg
+
                 rec = AccountRecord(
                     email=email,
                     password=acc.get("password", DEFAULT_PASSWORD),
@@ -260,10 +266,15 @@ def start_auto_oauth_daemon(interval_sec: float = 3.0, max_workers: int = 2):
                     sso_cookie=sso,
                     sso_rw_cookie=sso_rw,
                     access_token=tokens["access_token"],
-                    refresh_token=tokens["refresh_token"]
+                    refresh_token=tokens["refresh_token"],
+                    status="active" if is_healthy else "created",
+                    extra=extra_data
                 )
                 save_account(rec, DEFAULT_JSON_OUTPUT, DEFAULT_TXT_OUTPUT)
-                logger.info(f"🎉 [Auto-OAuth] ĐÃ TỰ ĐỘNG CẤP OAUTH CHO {email} THÀNH CÔNG!")
+                if is_healthy:
+                    logger.info(f"🎉 [Auto-OAuth] ĐÃ CẤP OAUTH VÀ XÁC THỰC HEALTH-CHECK 100% CHO {email}!")
+                else:
+                    logger.warning(f"⚠ [Auto-OAuth] Cấp OAuth cho {email} thành công nhưng health-check chưa đạt: {h_msg}")
             except Exception as e:
                 logger.warning(f"✘ [Auto-OAuth] Lỗi lấy token cho {email}: {e}")
             finally:

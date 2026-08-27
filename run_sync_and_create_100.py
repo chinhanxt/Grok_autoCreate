@@ -20,8 +20,8 @@ logger = logging.getLogger("sync_and_create")
 
 PROXYXOAY_KEY = "HVnSXrEVXRSrUYBkwYzuId"
 TARGET_NEW_ACCOUNTS = 100
-CREATION_WORKERS = 4
-SYNC_WORKERS = 2
+CREATION_WORKERS = 20
+SYNC_WORKERS = 5
 
 stop_event = threading.Event()
 save_lock = threading.Lock()
@@ -208,6 +208,12 @@ def main():
     time.sleep(15.0)
     stop_event.set()
     logger.info(f"🏁 HOÀN TẤT TOÀN BỘ TIẾN TRÌNH! Đã tạo thành công {created_success}/{TARGET_NEW_ACCOUNTS} tài khoản mới.")
+    try:
+        from core.exporter import save_oauth_router_accounts
+        count = save_oauth_router_accounts("grok_router_accounts.json", json_path=DEFAULT_JSON_OUTPUT)
+        logger.info(f"🎉 Đã xuất {count} tài khoản chuẩn Router ra 'grok_router_accounts.json'!")
+    except Exception as e:
+        logger.warning(f"Lỗi xuất router json: {e}")
 
 if __name__ == "__main__":
     main()

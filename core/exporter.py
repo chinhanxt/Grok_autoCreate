@@ -33,15 +33,21 @@ class AccountRecord:
         {
             "email": "...",
             "access_token": "...",
-            "refresh_token": "..."
+            "refresh_token": "...",
+            "sso_cookie": "...",
+            "sso_rw_cookie": "..."
         }
         """
         acc_tok = self.access_token or self.sso_cookie
         ref_tok = self.refresh_token or self.sso_rw_cookie or self.sso_cookie
+        sso = self.sso_cookie
+        sso_rw = self.sso_rw_cookie or self.sso_cookie
         return {
             "email": self.email,
             "access_token": acc_tok,
-            "refresh_token": ref_tok
+            "refresh_token": ref_tok,
+            "sso_cookie": sso,
+            "sso_rw_cookie": sso_rw
         }
 
     def to_line_format(self) -> str:
@@ -122,28 +128,49 @@ def load_accounts(json_path: str = "accounts.json") -> List[Dict[str, Any]]:
         return []
 
 
-def load_oauth_accounts(json_path: str = "accounts.json") -> List[Dict[str, Any]]:
+def load_oauth_accounts(json_path: str = "accounts.json", only_healthy: bool = False) -> List[Dict[str, Any]]:
     """
     Loads and exports all accounts in standard Grok Router OAuth format:
     [
       {
         "email": "...",
         "access_token": "...",
-        "refresh_token": "..."
+        "refresh_token": "...",
+        "sso_cookie": "...",
+        "sso_rw_cookie": "..."
       }
     ]
     """
     raw_accounts = load_accounts(json_path)
     oauth_list = []
     for acc in raw_accounts:
+        if only_healthy and acc.get("status") not in ("active", "healthy", "ok"):
+            continue
         email = acc.get("email", "")
         # Use access_token if present, else fallback to sso JWT
         access_token = acc.get("access_token") or acc.get("sso_cookie", "")
         # Use refresh_token if present, else fallback to sso_rw_cookie or sso_cookie
         refresh_token = acc.get("refresh_token") or acc.get("sso_rw_cookie") or acc.get("sso_cookie", "")
+        sso_cookie = acc.get("sso_cookie", "")
+        sso_rw_cookie = acc.get("sso_rw_cookie", sso_cookie)
         oauth_list.append({
             "email": email,
             "access_token": access_token,
-            "refresh_token": refresh_token
+            "refresh_token": refresh_token,
+            "sso_cookie": sso_cookie,
+            "sso_rw_cookie": sso_rw_cookie
         })
     return oauth_list
+
+
+def save_oauth_router_accounts(output_path: str, json_path: str = "accounts.json", only_healthy: bool = False) -> int:
+    """
+    Exports all accounts to a dedicated router JSON file with 5 standard fields.
+    Returns the count of exported accounts.
+    """
+    oauth_data = load_oauth_accounts(json_path, only_healthy=only_healthy)
+    with _FILE_LOCK:
+        with open(output_path, "w", encoding="utf-8") as f:
+            json.dump(oauth_data, f, indent=2, ensure_ascii=False)
+    return len(oauth_data)
+

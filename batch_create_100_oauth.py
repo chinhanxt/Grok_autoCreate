@@ -19,7 +19,7 @@ logger = logging.getLogger("batch_creator_100")
 
 PROXYXOAY_KEY = "HVnSXrEVXRSrUYBkwYzuId"
 TARGET_ACCOUNTS = 100
-CONCURRENT_WORKERS = 4  # Sweet spot for machine stability & rate-limits
+CONCURRENT_WORKERS = 20  # High-speed multi-threaded workers
 JSON_PATH = "/home/chinhan/xai-grok-account-creator/accounts.json"
 TXT_PATH = "/home/chinhan/xai-grok-account-creator/accounts.txt"
 
@@ -133,6 +133,12 @@ def main():
                 logger.error(f"Worker exception: {e}")
 
     logger.info(f"🏁 ĐÃ HOÀN TẤT BATCH! Tổng tài khoản thành công: {completed_count}/{TARGET_ACCOUNTS}")
+    try:
+        from core.exporter import save_oauth_router_accounts
+        count = save_oauth_router_accounts("grok_router_accounts.json", json_path=JSON_PATH)
+        logger.info(f"🎉 Đã xuất {count} tài khoản chuẩn Router ra 'grok_router_accounts.json'!")
+    except Exception as e:
+        logger.warning(f"Lỗi xuất file router: {e}")
 
 if __name__ == "__main__":
     main()

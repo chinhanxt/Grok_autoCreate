@@ -7,7 +7,7 @@ PYTHON := $(shell if [ -f $(VENV)/bin/python ]; then echo $(VENV)/bin/python; el
 PIP := $(shell if [ -f $(VENV)/bin/pip ]; then echo $(VENV)/bin/pip; else echo pip; fi)
 PYTEST := $(shell if [ -f $(VENV)/bin/pytest ]; then echo $(VENV)/bin/pytest; else echo pytest; fi)
 
-HOST ?= 127.0.0.1
+HOST ?= 0.0.0.0
 PORT ?= 7860
 
 .PHONY: all help dev start stop cli sync-oauth batch test install clean tor
