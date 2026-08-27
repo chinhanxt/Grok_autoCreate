@@ -267,7 +267,7 @@ def main():
         border_style="cyan"
     ))
 
-    num_threads = min(max(1, args.threads), 10)
+    num_threads = min(max(1, args.threads), 30)
     if num_threads > 1 and args.count > 1:
         console.print(f"[bold green]⚡ High-Speed Multi-Threading Mode: {num_threads} Concurrent Threads active![/bold green]")
 

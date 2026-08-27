@@ -361,14 +361,17 @@ class AccountCreator:
         session_id = ""
 
         start_wait = time.time()
-        while time.time() - start_wait < 25:
+        form_submitted = False
+        turnstile_clicked = False
+
+        while time.time() - start_wait < 45:
             cookies_dict = self.engine.get_cookies_dict()
             sso_cookie = cookies_dict.get("sso", "") or cookies_dict.get("sso_redirect_token", "")
             sso_rw_cookie = cookies_dict.get("sso-rw", "")
             user_id = cookies_dict.get("x-userid", "")
 
-            # Also check page context cookies directly
-            if not sso_cookie and self.page and self.page.context:
+            # Check page context cookies directly
+            if self.page and self.page.context:
                 try:
                     for c in self.page.context.cookies():
                         if c["name"] == "sso":
@@ -380,34 +383,36 @@ class AccountCreator:
                 except Exception:
                     pass
 
-            if sso_cookie or user_id or "grok.com" in self.page.url or "accounts.x.ai/account" in self.page.url:
-                time.sleep(0.3)
+            current_url = getattr(self.page, "url", "") or ""
+            if (sso_cookie and user_id) or "grok.com" in current_url or "accounts.x.ai/account" in current_url:
+                time.sleep(0.5)
                 break
 
             # A. Click Turnstile checkbox if present in iframe or main DOM
             try:
                 for frame in self.page.frames:
                     if "challenges.cloudflare.com" in frame.url:
-                        box = frame.locator('input[type="checkbox"], #challenge-stage, .ctp-checkbox-label').first
+                        box = frame.locator('input[type="checkbox"], #challenge-stage, .ctp-checkbox-label, #cf-stage').first
                         if box.count() > 0 and box.is_visible():
                             box.click(timeout=1000, force=True)
+                            turnstile_clicked = True
                 
-                # Check main page turnstile
                 main_ts = self.page.locator('.cf-turnstile, iframe[src*="cloudflare"], #challenge-stage').first
-                if main_ts.count() > 0 and main_ts.is_visible():
+                if main_ts.count() > 0 and main_ts.is_visible() and not turnstile_clicked:
                     main_ts.click(timeout=1000, force=True)
             except Exception:
                 pass
 
-            # B. Trigger submit button or press Enter
+            # B. Trigger submit button
             try:
                 submit_btn = self.page.locator('button[type="submit"], button:has-text("Complete sign up"), button:has-text("Create account"), button:has-text("Sign up"), button:has-text("Tiếp tục"), button:has-text("Continue")').first
                 if submit_btn.count() > 0 and submit_btn.is_visible():
                     is_disabled = submit_btn.get_attribute("disabled") is not None
                     if not is_disabled:
                         submit_btn.click(timeout=1500, force=True)
+                        form_submitted = True
                     else:
-                        if pwd_loc and pwd_loc.count() > 0:
+                        if pwd_loc and pwd_loc.count() > 0 and (time.time() - start_wait > 3.0) and not form_submitted:
                             pwd_loc.press("Enter")
                 else:
                     self.page.evaluate("""() => {
@@ -417,7 +422,7 @@ class AccountCreator:
             except Exception:
                 pass
 
-            time.sleep(0.5)
+            time.sleep(0.6)
 
         # Final cookie refresh to ensure all redirect cookies (sso, sso-rw, x-userid) are captured
         cookies_dict = self.engine.get_cookies_dict()
@@ -465,49 +470,68 @@ class AccountCreator:
             except Exception:
                 pass
 
-        # If session is still missing, perform instant fallback sign-in recovery
+        # If session is still missing, perform instant fallback sign-in recovery with Turnstile solving
         if not sso_cookie and not user_id and self.email and self.password:
             logger.info("Attempting automatic sign-in recovery for newly created account...")
             try:
-                self.page.goto("https://accounts.x.ai/sign-in?redirect=grok-com", wait_until="domcontentloaded", timeout=15000)
+                self.page.goto("https://accounts.x.ai/sign-in?redirect=grok-com", wait_until="domcontentloaded", timeout=20000)
                 time.sleep(1.0)
 
-                # Click 'Sign in with email' if present
+                # 0. Dismiss OneTrust cookie banners
+                try:
+                    cookie_btn = self.page.locator('#onetrust-accept-btn-handler, #onetrust-reject-all-handler, button:has-text("Accept all")')
+                    if cookie_btn.count() > 0 and cookie_btn.first.is_visible():
+                        cookie_btn.first.click(timeout=1000, force=True)
+                except Exception:
+                    pass
+
+                # 1. Click 'Sign in with email' if present
                 try:
                     sign_in_email_btn = self.page.locator('button:has-text("Sign in with email"), a:has-text("Sign in with email")').first
                     if sign_in_email_btn.count() > 0 and sign_in_email_btn.is_visible():
-                        sign_in_email_btn.click(timeout=1500, force=True)
+                        sign_in_email_btn.click(timeout=2000, force=True)
                         time.sleep(0.5)
                 except Exception:
                     pass
 
-                em_inp = self.page.locator('input[type="email"], input[name="email"], input[data-testid="email"]').first
+                # 2. Enter email
+                em_inp = self.page.locator('input[type="email"], input[name="email"], input[data-testid="email"], input[placeholder*="email" i]').first
                 if em_inp.count() > 0:
-                    em_inp.click(timeout=1000, force=True)
+                    em_inp.click(timeout=1500, force=True)
                     em_inp.fill(self.email)
                     
-                    # Click Next or press Enter
                     next_btn = self.page.locator('button[type="submit"], button:has-text("Next"), button:has-text("Continue"), button:has-text("Tiếp tục")').first
                     if next_btn.count() > 0 and next_btn.is_visible():
-                        next_btn.click(timeout=1500, force=True)
+                        next_btn.click(timeout=2000, force=True)
                     else:
                         self.page.keyboard.press("Enter")
                     time.sleep(1.5)
 
+                # 3. Enter password
                 pw_inp = self.page.locator('input[type="password"], input[name="password"], input[data-testid="password"]').first
                 if pw_inp.count() > 0:
-                    pw_inp.click(timeout=1000, force=True)
+                    pw_inp.click(timeout=1500, force=True)
                     pw_inp.fill(self.password)
 
-                    # Click Log in or press Enter
+                    # Solve Turnstile if present on sign-in
+                    try:
+                        for frame in self.page.frames:
+                            if "challenges.cloudflare.com" in frame.url:
+                                box = frame.locator('input[type="checkbox"], #challenge-stage').first
+                                if box.count() > 0 and box.is_visible():
+                                    box.click(timeout=1500, force=True)
+                    except Exception:
+                        pass
+
                     log_btn = self.page.locator('button[type="submit"], button:has-text("Log in"), button:has-text("Sign in"), button:has-text("Đăng nhập")').first
                     if log_btn.count() > 0 and log_btn.is_visible():
-                        log_btn.click(timeout=1500, force=True)
+                        log_btn.click(timeout=2000, force=True)
                     else:
                         self.page.keyboard.press("Enter")
-                    time.sleep(2.5)
+                    
+                    # Wait for redirect & session cookies
+                    time.sleep(3.0)
 
-                    # Check cookies again
                     for c in self.page.context.cookies():
                         if not sso_cookie and c["name"] == "sso":
                             sso_cookie = c["value"]
@@ -532,7 +556,7 @@ class AccountCreator:
         # Mint official xAI / Grok CLI OAuth 2.0 Tokens (at+jwt)
         access_token = ""
         refresh_token = ""
-        time.sleep(1.0)
+        time.sleep(0.5)
         try:
             from core.oauth import OAuthTokenManager
             oauth_mgr = OAuthTokenManager()
@@ -542,6 +566,10 @@ class AccountCreator:
             logger.info("Successfully minted official xAI OAuth 2.0 CLI Tokens!")
         except Exception as e:
             logger.warning(f"Auto OAuth token minting notice ({e}). Falling back to SSO session.")
+
+        # If user_id is still empty, extract from access_token JWT
+        if not user_id and access_token:
+            user_id = extract_user_id_from_jwt(access_token)
 
         # Normalize tokens if sso_cookie was extracted as access_token or vice-versa
         if not sso_cookie and access_token:

@@ -97,7 +97,7 @@ class OAuthTokenManager:
         try:
             btn1 = page.wait_for_selector(
                 'button:has-text("Continue"), button:has-text("Tiếp tục")',
-                timeout=10000
+                timeout=18000
             )
             if btn1:
                 btn1.click(force=True)
@@ -106,7 +106,7 @@ class OAuthTokenManager:
 
         # Wait for navigation to consent / verify / done page
         try:
-            page.wait_for_url(lambda url: "consent" in url or "verify" in url or "done" in url, timeout=8000)
+            page.wait_for_url(lambda url: "consent" in url or "verify" in url or "done" in url, timeout=12000)
         except Exception:
             pass
 
@@ -116,13 +116,13 @@ class OAuthTokenManager:
         try:
             btn2 = page.wait_for_selector(
                 'button:has-text("Allow"):not(#accept-recommended-btn-handler), button:has-text("Confirm"), button:has-text("Authorize"), button:has-text("Cho phép"), button:has-text("Xác nhận")',
-                timeout=10000
+                timeout=18000
             )
             if btn2:
                 btn2.click(force=True)
             
             try:
-                page.wait_for_url(lambda url: "done" in url, timeout=6000)
+                page.wait_for_url(lambda url: "done" in url, timeout=10000)
             except Exception:
                 pass
             return True
@@ -130,7 +130,7 @@ class OAuthTokenManager:
             logger.warning(f"Step 2 click warning: {e}")
             return False
 
-    def exchange_tokens(self, device_code: str, proxy: Optional[str] = None, max_attempts: int = 12) -> Dict[str, Any]:
+    def exchange_tokens(self, device_code: str, proxy: Optional[str] = None, max_attempts: int = 25) -> Dict[str, Any]:
         """
         Exchanges device_code for official OAuth access_token (at+jwt) and refresh_token.
         """

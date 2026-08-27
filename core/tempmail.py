@@ -161,23 +161,20 @@ class TempMailClient:
                 time.sleep(NETWORK_RETRY_DELAY)
                 continue
 
-            if resp.status_code == 429:
-                last_err = f"HTTP 429: {resp.text[:200]}"
-                # If using Tor, switch to a fresh exit circuit immediately
+            if resp.status_code in (403, 429):
+                last_err = f"HTTP {resp.status_code}: {resp.text[:200]}"
+                # If using Tor, switch to a fresh exit circuit immediately for this stream
                 self.rotate_tor_stream()
                 
-                delay = _retry_after_delay(resp) + (attempt * 0.5)
+                delay = 0.5
+                if resp.status_code == 429:
+                    delay = _retry_after_delay(resp) + (attempt * 0.3)
                 if attempt + 1 >= RATE_LIMIT_MAX_ATTEMPTS:
                     raise TempMailRateLimitError(
-                        f"Temp-Mail rate limited (HTTP 429: {resp.text[:200]})"
+                        f"Temp-Mail rate limited/blocked (HTTP {resp.status_code}: {resp.text[:200]})"
                     )
-                logger.warning(f"Temp-Mail rate limited (HTTP 429). Retrying in {delay:.1f}s...")
+                logger.warning(f"Temp-Mail HTTP {resp.status_code}. Xoay Tor IP & thử lại trong {delay:.1f}s...")
                 time.sleep(delay)
-                continue
-
-            if resp.status_code == 403 and self.proxies:
-                logger.info("Proxy blocked by Cloudflare on Temp-Mail; falling back to direct connection...")
-                self.proxies = None
                 continue
 
             if resp.status_code != 200:
@@ -203,55 +200,62 @@ class TempMailClient:
         import string
         import requests as std_requests
 
-        try:
-            # 1. Get active domain
-            dom_resp = std_requests.get("https://api.mail.tm/domains", timeout=10)
-            dom_data = dom_resp.json()
-            members = dom_data.get("hydra:member", [])
-            if not members:
-                raise RuntimeError("Không tìm thấy domain khả dụng trên Mail.tm")
-            domain = members[0]["domain"]
+        for tm_attempt in range(3):
+            try:
+                # 1. Get active domain
+                dom_resp = std_requests.get("https://api.mail.tm/domains", proxies=self.proxies, timeout=10)
+                dom_data = dom_resp.json()
+                members = dom_data.get("hydra:member", [])
+                if not members:
+                    raise RuntimeError("Không tìm thấy domain khả dụng trên Mail.tm")
+                domain = random.choice(members)["domain"]
 
-            # 2. Create account
-            rand_user = "xai_" + "".join(random.choices(string.ascii_lowercase + string.digits, k=8))
-            email = f"{rand_user}@{domain}"
-            pwd = "PasswordAI123!"
+                # 2. Create account
+                rand_user = "xai_" + "".join(random.choices(string.ascii_lowercase + string.digits, k=10))
+                email = f"{rand_user}@{domain}"
+                pwd = "PasswordAI123!"
 
-            std_requests.post(
-                "https://api.mail.tm/accounts",
-                json={"address": email, "password": pwd},
-                timeout=10
-            )
+                acc_resp = std_requests.post(
+                    "https://api.mail.tm/accounts",
+                    json={"address": email, "password": pwd},
+                    proxies=self.proxies,
+                    timeout=10
+                )
+                if acc_resp.status_code not in (200, 201):
+                    time.sleep(0.3)
+                    continue
 
-            # 3. Get JWT token
-            tok_resp = std_requests.post(
-                "https://api.mail.tm/token",
-                json={"address": email, "password": pwd},
-                timeout=10
-            )
-            tok_data = tok_resp.json()
-            token = tok_data.get("token")
-            if not token:
-                raise RuntimeError(f"Lỗi lấy token Mail.tm: {tok_data}")
+                time.sleep(0.2)
 
-            self.provider = "mail.tm"
-            self.email = email
-            self.set_token(token, email=email)
-            logger.info(f"Created fallback mail.tm inbox: {self.email}")
-            return self.email, self.token
-        except Exception as e:
-            logger.error(f"Mail.tm fallback error: {e}")
-            raise
+                # 3. Get JWT token
+                tok_resp = std_requests.post(
+                    "https://api.mail.tm/token",
+                    json={"address": email, "password": pwd},
+                    proxies=self.proxies,
+                    timeout=10
+                )
+                tok_data = tok_resp.json()
+                token = tok_data.get("token")
+                if not token:
+                    time.sleep(0.3)
+                    continue
+
+                self.provider = "mail.tm"
+                self.email = email
+                self.set_token(token, email=email)
+                logger.info(f"Created fallback mail.tm inbox: {self.email}")
+                return self.email, self.token
+            except Exception as e:
+                if tm_attempt == 2:
+                    logger.error(f"Mail.tm fallback error: {e}")
+                    raise
+                time.sleep(0.5)
 
     def create_mailbox(self) -> Dict[str, Any]:
         """
         Creates a new mailbox on web2.temp-mail.org and returns the raw response dictionary.
         """
-        global _inbox_creation_lock
-        with _inbox_creation_lock:
-            # Stagger mailbox creations slightly to avoid burst rate limits
-            time.sleep(0.3)
-            data = self._request("POST", f"{BASE_URL}/mailbox")
+        data = self._request("POST", f"{BASE_URL}/mailbox")
         self.token = data.get("token")
         if not self.token:
             raise RuntimeError(f"Invalid mailbox response: {data}")

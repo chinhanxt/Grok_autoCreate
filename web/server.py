@@ -386,7 +386,7 @@ def _run_account_creation_worker(task_id: str, req: SignupRequest):
         xai_active_proxy = None
         sess["logs"].append("Trình duyệt x.ai: Kết nối Trực tiếp (Direct Mode - Tránh lỗi Tor Region Block).")
 
-    num_threads = min(max(1, req.threads or 1), 10)
+    num_threads = min(max(1, req.threads or 1), 30)
     sess["threads"] = num_threads
     sess["start_time"] = time.time()
     sess["thread_states"] = {
@@ -470,9 +470,6 @@ def _run_account_creation_worker(task_id: str, req: SignupRequest):
 
         try:
             _set_thread_state("1. Khởi tạo trình duyệt & proxy...", 15)
-            # Stagger concurrent thread starts slightly
-            if num_threads > 1 and i > 0:
-                time.sleep(min((i % num_threads) * 0.2, 0.8))
 
             # Determine Name for this account
             if req.random_name or not req.first_name:
@@ -502,13 +499,15 @@ def _run_account_creation_worker(task_id: str, req: SignupRequest):
                         email = mailbox.email
                 
                 if not email:
-                    # Retry mailbox creation with per-worker Tor stream isolation
+                    # Instant per-worker Tor stream isolation: each worker gets a separate circuit / IP
                     for mb_try in range(3):
                         try:
                             worker_tor_proxy = None
-                            if tempmail_active_proxy and "9050" in tempmail_active_proxy:
-                                rnd_id = random.randint(10000, 99999)
-                                worker_tor_proxy = f"socks5://tw_{wid}_{rnd_id}:pwd_{rnd_id}@127.0.0.1:{req.tor_socks_port}"
+                            if tempmail_active_proxy and ("9050" in tempmail_active_proxy or "9052" in tempmail_active_proxy):
+                                # Distribute across tor1 (9050) and tor2 (9052)
+                                selected_port = 9050 if (wid % 2 == 1) else 9052
+                                rnd_id = random.randint(100000, 999999)
+                                worker_tor_proxy = f"socks5://tw_{wid}_{rnd_id}:pwd_{rnd_id}@127.0.0.1:{selected_port}"
                             tempmail_client = TempMailClient(proxy=worker_tor_proxy or tempmail_active_proxy)
                             email, token = tempmail_client.create_inbox()
                             break
@@ -519,7 +518,7 @@ def _run_account_creation_worker(task_id: str, req: SignupRequest):
                                     sess["failed_count"] += 1
                                     sess["logs"].append(f"{tag} Lỗi Temp-Mail: {e}")
                                 return
-                            time.sleep(1.0 + mb_try * 1.0)
+                            time.sleep(0.5)
 
             _set_thread_state("3. Truy cập x.ai & vượt Cloudflare...", 45, email_addr=email)
             with lock:
@@ -670,7 +669,7 @@ def _run_account_creation_worker(task_id: str, req: SignupRequest):
 def start_signup(req: SignupRequest):
     task_id = str(uuid.uuid4())
     total_count = max(1, req.count or 1)
-    num_threads = min(max(1, req.threads or 1), 10)
+    num_threads = min(max(1, req.threads or 1), 30)
     SESSIONS[task_id] = {
         "id": task_id,
         "status": "pending",
