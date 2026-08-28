@@ -93,10 +93,19 @@ class OAuthTokenManager:
             pass
         time.sleep(0.5)
 
+        # Dismiss any OneTrust / cookie banners first
+        try:
+            cookie_btn = page.locator('#onetrust-accept-btn-handler, #onetrust-reject-all-handler, button:has-text("Accept all")').first
+            if cookie_btn.count() > 0 and cookie_btn.is_visible():
+                cookie_btn.click(timeout=1000, force=True)
+                time.sleep(0.2)
+        except Exception:
+            pass
+
         # Step 1: Wait for Continue button to become enabled and click
         try:
             btn1 = page.wait_for_selector(
-                'button:has-text("Continue"), button:has-text("Tiếp tục")',
+                'button[type="submit"]:has-text("Continue"), button:has-text("Continue"):not([class*="onetrust"]), button:has-text("Tiếp tục")',
                 timeout=10000
             )
             if btn1:
@@ -115,7 +124,7 @@ class OAuthTokenManager:
         # Step 2: Strictly click Confirm / Allow / Authorize (Never Deny or Cookie banner)
         try:
             btn2 = page.wait_for_selector(
-                'button:has-text("Allow"):not(#accept-recommended-btn-handler), button:has-text("Confirm"), button:has-text("Authorize"), button:has-text("Cho phép"), button:has-text("Xác nhận")',
+                'button[type="submit"]:has-text("Allow"), button:has-text("Allow"):not([class*="onetrust"]):not([class*="preference"]), button:has-text("Authorize"), button[data-testid*="allow" i], button:has-text("Cho phép"), button[type="submit"]:has-text("Confirm"):not([class*="onetrust"]):not([class*="preference"])',
                 timeout=10000
             )
             if btn2:
@@ -128,6 +137,21 @@ class OAuthTokenManager:
             return True
         except Exception as e:
             logger.warning(f"Step 2 click warning: {e}")
+            # Fallback JS click on allow button
+            try:
+                page.evaluate("""() => {
+                    const btns = Array.from(document.querySelectorAll('button'));
+                    const allow = btns.find(b => {
+                        const t = (b.innerText || '').toLowerCase();
+                        const cls = (b.className || '').toLowerCase();
+                        return (t.includes('allow') || t.includes('authorize') || t.includes('cho phép')) && !cls.includes('onetrust') && !cls.includes('preference');
+                    });
+                    if (allow) allow.click();
+                }""")
+                time.sleep(1.0)
+                return True
+            except Exception:
+                pass
             return False
 
     def exchange_tokens(self, device_code: str, proxy: Optional[str] = None, max_attempts: int = 12) -> Dict[str, Any]:

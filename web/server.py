@@ -621,7 +621,7 @@ def _run_account_creation_worker(task_id: str, req: SignupRequest):
             with lock:
                 sess["logs"].append(f"{tag} Inbox: {email} -> Đang mở x.ai...")
 
-            max_attempts = 2
+            max_attempts = 3
             for attempt in range(max_attempts):
                 if sess.get("stopped"):
                     break
@@ -641,12 +641,13 @@ def _run_account_creation_worker(task_id: str, req: SignupRequest):
                 if attempt > 0:
                     # Acquire fresh mailbox for retry attempt so we don't collide with already registered email
                     fresh_email = None
+                    new_tm_client = None
                     if pool is not None:
                         mailbox = pool.acquire(timeout=0.5)
                         if mailbox:
                             mbox_proxy = mailbox.proxy or tempmail_active_proxy
-                            tempmail_client = TempMailClient(proxy=mbox_proxy)
-                            tempmail_client.set_token(mailbox.token, email=mailbox.email)
+                            new_tm_client = TempMailClient(proxy=mbox_proxy)
+                            new_tm_client.set_token(mailbox.token, email=mailbox.email)
                             fresh_email = mailbox.email
                     if not fresh_email:
                         try:
@@ -655,17 +656,23 @@ def _run_account_creation_worker(task_id: str, req: SignupRequest):
                                 rnd_id = random.randint(10000, 99999)
                                 tor_p = 9052 if (wid % 2 == 0) else req.tor_socks_port
                                 worker_tor_proxy = f"socks5://tw_{wid}_{rnd_id}:pwd_{rnd_id}@127.0.0.1:{tor_p}"
-                            tempmail_client = TempMailClient(proxy=worker_tor_proxy or tempmail_active_proxy)
-                            fresh_email, _ = tempmail_client.create_inbox()
+                            try_client = TempMailClient(proxy=worker_tor_proxy or tempmail_active_proxy)
+                            fresh_email, _ = try_client.create_inbox()
+                            if fresh_email and try_client.token:
+                                new_tm_client = try_client
                         except Exception:
                             pass
-                    if fresh_email:
+                    if fresh_email and new_tm_client and new_tm_client.token:
                         email = fresh_email
+                        tempmail_client = new_tm_client
 
                     _set_thread_state(f"Thử lại lần {attempt+1}/{max_attempts}...", 40, email_addr=email)
                     with lock:
                         sess["logs"].append(f"{tag} Thử lại lần {attempt+1}/{max_attempts}... (Email mới: {email})")
                     time.sleep(1.0)
+
+                if req.use_tempmail and (not tempmail_client or not tempmail_client.token):
+                    raise RuntimeError("Hòm thư Temp-Mail chưa được khởi tạo thành công (Token rỗng).")
 
                 engine = StealthEngine(headless=req.headless, proxy=thread_xai_proxy)
                 creator = AccountCreator(engine=engine)
@@ -676,7 +683,10 @@ def _run_account_creation_worker(task_id: str, req: SignupRequest):
                     with lock:
                         sess["logs"].append(f"{tag} Đã vượt Cloudflare -> Chờ OTP...")
 
-                    otp_code = tempmail_client.fetch_otp_code(timeout_sec=50, page=creator.page)
+                    if not tempmail_client or not tempmail_client.token:
+                        raise RuntimeError("Hòm thư Temp-Mail chưa sẵn sàng để nhận mã OTP.")
+
+                    otp_code = tempmail_client.fetch_otp_code(timeout_sec=60, page=creator.page)
                     if not otp_code:
                         raise RuntimeError("Không nhận được mã OTP từ x.ai.")
 

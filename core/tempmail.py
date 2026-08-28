@@ -122,7 +122,10 @@ class TempMailClient:
         self.proxy = self._format_isolated_proxy(proxy)
         self.proxies = {"http": self.proxy, "https": self.proxy} if self.proxy else None
 
-    def set_token(self, token: str, email: Optional[str] = None):
+    def set_token(self, token: Optional[str], email: Optional[str] = None):
+        if not token:
+            self.token = None
+            return
         if not token.startswith("Bearer "):
             token = f"Bearer {token}"
         self.token = token
@@ -130,10 +133,11 @@ class TempMailClient:
         if email:
             self.email = email
 
-    def _request(self, method: str, url: str, data: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    def _request(self, method: str, url: str, data: Optional[Dict[str, Any]] = None, max_retries: Optional[int] = None) -> Dict[str, Any]:
         last_err = None
+        limit_attempts = max_retries if max_retries is not None else RATE_LIMIT_MAX_ATTEMPTS
 
-        for attempt in range(RATE_LIMIT_MAX_ATTEMPTS):
+        for attempt in range(limit_attempts):
             try:
                 if USE_CFFI:
                     resp = requests.request(
@@ -143,7 +147,7 @@ class TempMailClient:
                         json=data if data else None,
                         proxies=self.proxies,
                         impersonate="chrome",
-                        timeout=20,
+                        timeout=15,
                     )
                 else:
                     resp = requests.request(
@@ -152,7 +156,7 @@ class TempMailClient:
                         headers=self.headers,
                         json=data if data else None,
                         proxies=self.proxies,
-                        timeout=20,
+                        timeout=15,
                     )
             except Exception as e:
                 last_err = str(e)
@@ -166,11 +170,11 @@ class TempMailClient:
                 # If using Tor, switch to a fresh exit circuit immediately
                 self.rotate_tor_stream()
                 
-                delay = _retry_after_delay(resp) + (attempt * 0.5)
-                if attempt + 1 >= RATE_LIMIT_MAX_ATTEMPTS:
+                if attempt + 1 >= limit_attempts:
                     raise TempMailRateLimitError(
                         f"Temp-Mail rate limited (HTTP 429: {resp.text[:200]})"
                     )
+                delay = _retry_after_delay(resp) + (attempt * 0.5)
                 logger.warning(f"Temp-Mail rate limited (HTTP 429). Retrying in {delay:.1f}s...")
                 time.sleep(delay)
                 continue
@@ -210,18 +214,20 @@ class TempMailClient:
             members = dom_data.get("hydra:member", [])
             if not members:
                 raise RuntimeError("Không tìm thấy domain khả dụng trên Mail.tm")
-            domain = members[0]["domain"]
+            domain = random.choice(members)["domain"] if members else "emalupe.com"
 
             # 2. Create account
-            rand_user = "xai_" + "".join(random.choices(string.ascii_lowercase + string.digits, k=8))
+            rand_user = "xai_" + "".join(random.choices(string.ascii_lowercase + string.digits, k=9))
             email = f"{rand_user}@{domain}"
             pwd = "PasswordAI123!"
 
-            std_requests.post(
+            acc_resp = std_requests.post(
                 "https://api.mail.tm/accounts",
                 json={"address": email, "password": pwd},
                 timeout=10
             )
+            if acc_resp.status_code not in (200, 201):
+                raise RuntimeError(f"Mail.tm account creation error ({acc_resp.status_code}): {acc_resp.text}")
 
             # 3. Get JWT token
             tok_resp = std_requests.post(
@@ -243,15 +249,77 @@ class TempMailClient:
             logger.error(f"Mail.tm fallback error: {e}")
             raise
 
+    def _create_mail_gw_inbox(self) -> Tuple[str, str]:
+        """Fallback to api.mail.gw."""
+        import string
+        import requests as std_requests
+
+        try:
+            dom_resp = std_requests.get("https://api.mail.gw/domains", timeout=10)
+            dom_data = dom_resp.json()
+            members = dom_data.get("hydra:member", [])
+            if not members:
+                raise RuntimeError("Không tìm thấy domain khả dụng trên Mail.gw")
+            domain = random.choice(members)["domain"] if members else "westcast-systems.com"
+
+            rand_user = "xai_" + "".join(random.choices(string.ascii_lowercase + string.digits, k=9))
+            email = f"{rand_user}@{domain}"
+            pwd = "PasswordAI123!"
+
+            acc_resp = std_requests.post(
+                "https://api.mail.gw/accounts",
+                json={"address": email, "password": pwd},
+                timeout=10
+            )
+            if acc_resp.status_code not in (200, 201):
+                raise RuntimeError(f"Mail.gw account creation error ({acc_resp.status_code}): {acc_resp.text}")
+
+            tok_resp = std_requests.post(
+                "https://api.mail.gw/token",
+                json={"address": email, "password": pwd},
+                timeout=10
+            )
+            tok_data = tok_resp.json()
+            token = tok_data.get("token")
+            if not token:
+                raise RuntimeError(f"Lỗi lấy token Mail.gw: {tok_data}")
+
+            self.provider = "mail.gw"
+            self.email = email
+            self.set_token(token, email=email)
+            logger.info(f"Created fallback mail.gw inbox: {self.email}")
+            return self.email, self.token
+        except Exception as e:
+            logger.error(f"Mail.gw fallback error: {e}")
+            raise
+
+    def _create_guerrillamail_inbox(self) -> Tuple[str, str]:
+        """Fallback to api.guerrillamail.com (unlimited, ultra fast)."""
+        import requests as std_requests
+
+        try:
+            resp = std_requests.get("https://api.guerrillamail.com/ajax.php?f=get_email_address", timeout=10)
+            data = resp.json()
+            email = data.get("email_addr")
+            sid_token = data.get("sid_token")
+            if not email or not sid_token:
+                raise RuntimeError(f"Lỗi khởi tạo GuerrillaMail: {data}")
+
+            self.provider = "guerrillamail"
+            self.email = email
+            self.token = sid_token
+            logger.info(f"Created fallback guerrillamail inbox: {self.email}")
+            return self.email, self.token
+        except Exception as e:
+            logger.error(f"GuerrillaMail fallback error: {e}")
+            raise
+
     def create_mailbox(self) -> Dict[str, Any]:
         """
         Creates a new mailbox on web2.temp-mail.org and returns the raw response dictionary.
         """
-        global _inbox_creation_lock
-        with _inbox_creation_lock:
-            # Stagger mailbox creations slightly to avoid burst rate limits
-            time.sleep(0.3)
-            data = self._request("POST", f"{BASE_URL}/mailbox")
+        # Fast failover: 1 attempt on temp-mail.org; if 429 rate-limited, immediately fall back to cascade
+        data = self._request("POST", f"{BASE_URL}/mailbox", max_retries=1)
         self.token = data.get("token")
         if not self.token:
             raise RuntimeError(f"Invalid mailbox response: {data}")
@@ -264,14 +332,35 @@ class TempMailClient:
 
     def create_inbox(self) -> Tuple[str, str]:
         """
-        Creates a new mailbox on web2.temp-mail.org or falls back seamlessly to mail.tm.
+        Creates a new mailbox with 4-tier cascade:
+        1. temp-mail.org
+        2. mail.tm
+        3. mail.gw
+        4. guerrillamail.com
         """
+        errors = []
         try:
             self.create_mailbox()
             return self.email, self.token
         except Exception as e:
-            logger.warning(f"Temp-mail.org rate limited/error ({e}). Seamlessly switching to Mail.tm...")
+            errors.append(f"temp-mail: {e}")
+
+        try:
             return self._create_mail_tm_inbox()
+        except Exception as e:
+            errors.append(f"mail.tm: {e}")
+
+        try:
+            return self._create_mail_gw_inbox()
+        except Exception as e:
+            errors.append(f"mail.gw: {e}")
+
+        try:
+            return self._create_guerrillamail_inbox()
+        except Exception as e:
+            errors.append(f"guerrillamail: {e}")
+
+        raise RuntimeError(f"Tất cả các nguồn Temp-Mail đều bận ({'; '.join(errors)})")
 
     def get_messages(self) -> Dict[str, Any]:
         """
@@ -280,14 +369,26 @@ class TempMailClient:
         if not self.token:
             raise ValueError("No mailbox token found. Call create_inbox() or set_token() first.")
 
-        if self.provider == "mail.tm":
+        if self.provider in ("mail.tm", "mail.gw"):
+            base_api = "https://api.mail.tm" if self.provider == "mail.tm" else "https://api.mail.gw"
             import requests as std_requests
             headers = {"Authorization": self.token}
             try:
-                resp = std_requests.get("https://api.mail.tm/messages", headers=headers, timeout=10)
+                resp = std_requests.get(f"{base_api}/messages", headers=headers, timeout=10)
                 if resp.status_code == 200:
                     members = resp.json().get("hydra:member", [])
                     return {"messages": [{"_id": m["id"], "subject": m.get("subject", ""), "intro": m.get("intro", "")} for m in members]}
+            except Exception:
+                pass
+            return {"messages": []}
+
+        if self.provider == "guerrillamail":
+            import requests as std_requests
+            try:
+                resp = std_requests.get(f"https://api.guerrillamail.com/ajax.php?f=get_email_list&offset=0&sid_token={self.token}", timeout=10)
+                if resp.status_code == 200:
+                    items = resp.json().get("list", [])
+                    return {"messages": [{"_id": str(m.get("mail_id")), "subject": m.get("mail_subject", ""), "intro": m.get("mail_excerpt", ""), "bodyText": m.get("mail_body", "")} for m in items]}
             except Exception:
                 pass
             return {"messages": []}
@@ -301,11 +402,12 @@ class TempMailClient:
         if not self.token:
             raise ValueError("No mailbox token found. Call create_inbox() or set_token() first.")
 
-        if self.provider == "mail.tm":
+        if self.provider in ("mail.tm", "mail.gw"):
+            base_api = "https://api.mail.tm" if self.provider == "mail.tm" else "https://api.mail.gw"
             import requests as std_requests
             headers = {"Authorization": self.token}
             try:
-                resp = std_requests.get(f"https://api.mail.tm/messages/{message_id}", headers=headers, timeout=10)
+                resp = std_requests.get(f"{base_api}/messages/{message_id}", headers=headers, timeout=10)
                 if resp.status_code == 200:
                     data = resp.json()
                     html_content = data.get("html", "")
@@ -319,6 +421,10 @@ class TempMailClient:
                 pass
             return {}
 
+        if self.provider == "guerrillamail":
+            # Guerrilla mail already includes full body in get_messages
+            return {}
+
         return self._request("GET", f"{BASE_URL}/messages/{message_id}")
 
     def fetch_otp_code(
@@ -328,25 +434,25 @@ class TempMailClient:
         page: Optional[Any] = None
     ) -> Optional[str]:
         """
-        Polls web2.temp-mail.org/messages for OTP code matching temp_mail_gui logic.
+        Polls messages for OTP code with intelligent auto-resend.
         """
         if not self.token:
             raise ValueError("Mailbox token not set. Call set_token() or create_inbox() first.")
 
         start_time = time.time()
-        resend_attempted = False
+        resend_count = 0
 
         while time.time() - start_time < timeout_sec:
             elapsed = time.time() - start_time
 
-            # Auto-click Resend after 30s if needed
-            if page and elapsed >= 30 and not resend_attempted:
+            # Auto-click Resend at 25s and 45s if needed
+            if page and (elapsed >= 25 and resend_count == 0 or elapsed >= 45 and resend_count == 1):
                 try:
                     resend_btn = page.locator('button:has-text("Resend"), button:has-text("Gửi lại"), a:has-text("Resend"), a:has-text("Gửi lại"), [data-testid*="resend"]').first
                     if resend_btn.count() > 0 and resend_btn.is_visible():
-                        logger.info("Clicking Resend code on x.ai...")
+                        logger.info(f"Clicking Resend code on x.ai (attempt {resend_count+1})...")
                         resend_btn.click(force=True)
-                        resend_attempted = True
+                        resend_count += 1
                 except Exception:
                     pass
 
@@ -354,11 +460,25 @@ class TempMailClient:
                 data = self.get_messages()
                 messages = data.get("messages", [])
                 for msg in messages:
+                    # 1. Check subject
                     subject = msg.get("subject", "")
                     otp = extract_otp_from_text(subject)
                     if otp:
                         return otp
 
+                    # 2. Check intro / pre-extracted bodyText
+                    intro = msg.get("intro", "")
+                    otp = extract_otp_from_text(intro)
+                    if otp:
+                        return otp
+
+                    body_direct = msg.get("bodyText", "")
+                    if body_direct:
+                        otp = extract_otp_from_text(body_direct)
+                        if otp:
+                            return otp
+
+                    # 3. Check detailed message body
                     msg_id = msg.get("_id")
                     if msg_id:
                         detail = self.get_message_detail(msg_id)

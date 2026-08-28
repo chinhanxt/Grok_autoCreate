@@ -345,6 +345,10 @@ class AccountCreator:
         try:
             self.page.evaluate("""() => {
                 document.querySelectorAll('input').forEach(el => {
+                    try {
+                        const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+                        if (setter) setter.call(el, el.value);
+                    } catch (e) {}
                     el.dispatchEvent(new Event('input', { bubbles: true }));
                     el.dispatchEvent(new Event('change', { bubbles: true }));
                     el.dispatchEvent(new Event('blur', { bubbles: true }));
@@ -361,7 +365,7 @@ class AccountCreator:
         session_id = ""
 
         start_wait = time.time()
-        while time.time() - start_wait < 25:
+        while time.time() - start_wait < 40:
             cookies_dict = self.engine.get_cookies_dict()
             sso_cookie = cookies_dict.get("sso", "") or cookies_dict.get("sso_redirect_token", "")
             sso_rw_cookie = cookies_dict.get("sso-rw", "")
@@ -381,14 +385,14 @@ class AccountCreator:
                     pass
 
             if sso_cookie or user_id or "grok.com" in self.page.url or "accounts.x.ai/account" in self.page.url:
-                time.sleep(0.3)
+                time.sleep(0.5)
                 break
 
             # A. Click Turnstile checkbox if present in iframe or main DOM
             try:
                 for frame in self.page.frames:
                     if "challenges.cloudflare.com" in frame.url:
-                        box = frame.locator('input[type="checkbox"], #challenge-stage, .ctp-checkbox-label').first
+                        box = frame.locator('input[type="checkbox"], #challenge-stage, .ctp-checkbox-label, #turnstile-wrapper').first
                         if box.count() > 0 and box.is_visible():
                             box.click(timeout=1000, force=True)
                 
@@ -401,9 +405,9 @@ class AccountCreator:
 
             # B. Trigger submit button or press Enter
             try:
-                submit_btn = self.page.locator('button[type="submit"], button:has-text("Complete sign up"), button:has-text("Create account"), button:has-text("Sign up"), button:has-text("Tiếp tục"), button:has-text("Continue")').first
+                submit_btn = self.page.locator('button[type="submit"], button:has-text("Complete sign up"), button:has-text("Create account"), button:has-text("Sign up"), button:has-text("Tiếp tục"), button:has-text("Continue"), button:has-text("Create profile")').first
                 if submit_btn.count() > 0 and submit_btn.is_visible():
-                    is_disabled = submit_btn.get_attribute("disabled") is not None
+                    is_disabled = submit_btn.get_attribute("disabled") is not None or "disabled" in (submit_btn.get_attribute("class") or "")
                     if not is_disabled:
                         submit_btn.click(timeout=1500, force=True)
                     else:
@@ -446,6 +450,21 @@ class AccountCreator:
             except Exception:
                 pass
 
+        # If session is still missing, visit grok.com to trigger cookie synchronization
+        if not sso_cookie and not user_id and self.page and self.page.context:
+            try:
+                self.page.goto("https://grok.com", wait_until="domcontentloaded", timeout=10000)
+                time.sleep(1.0)
+                for c in self.page.context.cookies():
+                    if c["name"] == "sso":
+                        sso_cookie = c["value"]
+                    elif c["name"] == "sso-rw":
+                        sso_rw_cookie = c["value"]
+                    elif c["name"] == "x-userid":
+                        user_id = c["value"]
+            except Exception:
+                pass
+
         # Check localStorage for auth tokens
         if not sso_cookie:
             try:
@@ -472,9 +491,9 @@ class AccountCreator:
                 self.page.goto("https://accounts.x.ai/sign-in?redirect=grok-com", wait_until="domcontentloaded", timeout=15000)
                 time.sleep(1.0)
 
-                # Click 'Sign in with email' if present
+                # Click 'Sign in with email' or 'Sign in with password' if present
                 try:
-                    sign_in_email_btn = self.page.locator('button:has-text("Sign in with email"), a:has-text("Sign in with email")').first
+                    sign_in_email_btn = self.page.locator('button:has-text("Sign in with email"), a:has-text("Sign in with email"), button:has-text("Use password"), button:has-text("Sign in with password")').first
                     if sign_in_email_btn.count() > 0 and sign_in_email_btn.is_visible():
                         sign_in_email_btn.click(timeout=1500, force=True)
                         time.sleep(0.5)
@@ -494,10 +513,26 @@ class AccountCreator:
                         self.page.keyboard.press("Enter")
                     time.sleep(1.5)
 
+                # Check if 'Enter password instead' link or button appears
+                try:
+                    pwd_opt_btn = self.page.locator('button:has-text("password"), a:has-text("password"), button:has-text("Use password"), a:has-text("Use password")').first
+                    if pwd_opt_btn.count() > 0 and pwd_opt_btn.is_visible():
+                        pwd_opt_btn.click(timeout=1500, force=True)
+                        time.sleep(0.5)
+                except Exception:
+                    pass
+
                 pw_inp = self.page.locator('input[type="password"], input[name="password"], input[data-testid="password"]').first
                 if pw_inp.count() > 0:
                     pw_inp.click(timeout=1000, force=True)
                     pw_inp.fill(self.password)
+
+                    # Solve Turnstile if present on sign-in page
+                    for frame in self.page.frames:
+                        if "challenges.cloudflare.com" in frame.url:
+                            box = frame.locator('input[type="checkbox"], #challenge-stage').first
+                            if box.count() > 0 and box.is_visible():
+                                box.click(timeout=1000, force=True)
 
                     # Click Log in or press Enter
                     log_btn = self.page.locator('button[type="submit"], button:has-text("Log in"), button:has-text("Sign in"), button:has-text("Đăng nhập")').first
@@ -505,7 +540,7 @@ class AccountCreator:
                         log_btn.click(timeout=1500, force=True)
                     else:
                         self.page.keyboard.press("Enter")
-                    time.sleep(2.5)
+                    time.sleep(3.0)
 
                     # Check cookies again
                     for c in self.page.context.cookies():
