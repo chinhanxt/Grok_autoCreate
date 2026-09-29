@@ -39,7 +39,9 @@ class StealthEngine:
         self.headless = headless
         self.proxy = proxy
         self.timeout_ms = timeout_ms
+        self.playwright_cm = None
         self.playwright = None
+        self.camoufox_cm = None
         self.browser: Optional[Browser] = None
         self.context: Optional[BrowserContext] = None
         self.page: Optional[Page] = None
@@ -98,48 +100,73 @@ class StealthEngine:
                 return self.page
             except Exception as e:
                 logger.warning(f"Camoufox launch failed ({e}), falling back to Patchright/Playwright...")
-                try:
-                    if hasattr(self, "camoufox_cm") and self.camoufox_cm:
+                if hasattr(self, "camoufox_cm") and self.camoufox_cm:
+                    try:
                         self.camoufox_cm.__exit__(None, None, None)
-                except Exception:
-                    pass
+                    except Exception:
+                        pass
+                    self.camoufox_cm = None
                 self.browser = None
                 self.context = None
                 self.page = None
                 import asyncio
                 try:
-                    asyncio.set_event_loop(asyncio.new_event_loop())
+                    asyncio.set_event_loop(None)
                 except Exception:
                     pass
 
         # 2. Fallback to Patchright or Playwright Stealth
-        launcher = sync_patchright if USE_PATCHRIGHT else sync_playwright
-        self.playwright = launcher().__enter__()
-        args = [
-            "--disable-blink-features=AutomationControlled",
-            "--no-sandbox",
-            "--disable-dev-shm-usage",
-            "--disable-infobars"
-        ]
-        self.browser = self.playwright.chromium.launch(
-            headless=self.headless,
-            proxy=proxy_cfg,
-            args=args
-        )
-        self.context = self.browser.new_context(
-            user_agent=(
-                "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-                "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-            ),
-            viewport={"width": 1280, "height": 800},
-            locale="en-US",
-            timezone_id="America/New_York"
-        )
-        self.page = self.context.new_page()
-        self.page.set_default_timeout(self.timeout_ms)
-        self._setup_network_listeners()
-        self.engine_type = "patchright" if USE_PATCHRIGHT else "playwright"
-        return self.page
+        try:
+            import asyncio
+            try:
+                asyncio.set_event_loop(None)
+            except Exception:
+                pass
+
+            launcher = sync_patchright if USE_PATCHRIGHT else sync_playwright
+            self.playwright_cm = launcher()
+            self.playwright = self.playwright_cm.start()
+            args = [
+                "--disable-blink-features=AutomationControlled",
+                "--no-sandbox",
+                "--disable-dev-shm-usage",
+                "--disable-infobars"
+            ]
+            launch_kwargs = {
+                "headless": self.headless,
+                "proxy": proxy_cfg,
+                "args": args
+            }
+            if os.path.exists("/usr/bin/google-chrome"):
+                launch_kwargs["channel"] = "chrome"
+
+            try:
+                self.browser = self.playwright.chromium.launch(**launch_kwargs)
+            except Exception as launch_err:
+                if "channel" in launch_kwargs:
+                    logger.warning(f"Chromium launch with channel=chrome failed ({launch_err}), attempting fallback...")
+                    launch_kwargs.pop("channel", None)
+                    self.browser = self.playwright.chromium.launch(**launch_kwargs)
+                else:
+                    raise launch_err
+
+            self.context = self.browser.new_context(
+                user_agent=(
+                    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                    "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+                ),
+                viewport={"width": 1280, "height": 800},
+                locale="en-US",
+                timezone_id="America/New_York"
+            )
+            self.page = self.context.new_page()
+            self.page.set_default_timeout(self.timeout_ms)
+            self._setup_network_listeners()
+            self.engine_type = "patchright" if USE_PATCHRIGHT else "playwright"
+            return self.page
+        except Exception as e:
+            self.close()
+            raise e
 
     def _setup_network_listeners(self):
         """
@@ -282,14 +309,50 @@ class StealthEngine:
         Closes the browser and cleans up resources.
         """
         try:
+            if self.page:
+                try:
+                    self.page.close()
+                except Exception:
+                    pass
+                self.page = None
+
             if self.context:
-                self.context.close()
+                try:
+                    self.context.close()
+                except Exception:
+                    pass
+                self.context = None
+
             if self.browser:
-                if self.engine_type == "camoufox" and hasattr(self, "camoufox_cm"):
-                    self.camoufox_cm.__exit__(None, None, None)
-                else:
+                try:
                     self.browser.close()
+                except Exception:
+                    pass
+                self.browser = None
+
+            if self.engine_type == "camoufox" and hasattr(self, "camoufox_cm") and self.camoufox_cm:
+                try:
+                    self.camoufox_cm.__exit__(None, None, None)
+                except Exception:
+                    pass
+                self.camoufox_cm = None
+
             if self.playwright:
-                self.playwright.__exit__(None, None, None)
-        except Exception:
-            pass
+                try:
+                    self.playwright.stop()
+                except Exception:
+                    pass
+                self.playwright = None
+
+            if hasattr(self, "playwright_cm") and self.playwright_cm:
+                try:
+                    self.playwright_cm.__exit__(None, None, None)
+                except Exception:
+                    pass
+                self.playwright_cm = None
+        finally:
+            try:
+                import asyncio
+                asyncio.set_event_loop(None)
+            except Exception:
+                pass
