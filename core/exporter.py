@@ -3,9 +3,10 @@ Account export and storage module.
 """
 import os
 import json
+import uuid
 from dataclasses import dataclass, asdict, field
 from datetime import datetime, timezone
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Union
 
 
 @dataclass
@@ -38,16 +39,37 @@ class AccountRecord:
             "sso_rw_cookie": "..."
         }
         """
+        is_real_rt = bool(
+            self.refresh_token
+            and not self.refresh_token.startswith("sso")
+            and ";" not in self.refresh_token
+        )
+        valid_ref = self.refresh_token if is_real_rt else ""
         acc_tok = self.access_token or self.sso_cookie
-        ref_tok = self.refresh_token or self.sso_rw_cookie or self.sso_cookie
         sso = self.sso_cookie
         sso_rw = self.sso_rw_cookie or self.sso_cookie
         return {
             "email": self.email,
             "access_token": acc_tok,
-            "refresh_token": ref_tok,
+            "refresh_token": valid_ref,
             "sso_cookie": sso,
             "sso_rw_cookie": sso_rw
+        }
+
+    def to_router_node_dict(self) -> Dict[str, Any]:
+        # Chỉ nhận refresh_token thật (chuỗi OAuth hợp lệ, không chứa cookie 'sso=')
+        is_real_rt = bool(self.refresh_token and not self.refresh_token.startswith("sso") and ";" not in self.refresh_token)
+        valid_ref = self.refresh_token if is_real_rt else ""
+        return {
+            "id": self.user_id or str(uuid.uuid4()),
+            "name": self.email,
+            "email": self.email,
+            "ssoToken": self.access_token,
+            "refreshToken": valid_ref,
+            "status": self.status or "active",
+            "createdAt": self.created_at,
+            "oauthVerified": is_real_rt,
+            "oauthScope": self.extra.get("scope", "grok-cli:access") if self.extra else "grok-cli:access"
         }
 
     def to_line_format(self) -> str:
@@ -128,6 +150,28 @@ def load_accounts(json_path: str = "accounts.json") -> List[Dict[str, Any]]:
         return []
 
 
+def _to_account_record(item: Any) -> AccountRecord:
+    if isinstance(item, AccountRecord):
+        return item
+    if isinstance(item, dict):
+        return AccountRecord(
+            email=item.get("email", ""),
+            password=item.get("password", ""),
+            first_name=item.get("first_name", ""),
+            last_name=item.get("last_name", ""),
+            user_id=item.get("user_id", ""),
+            session_id=item.get("session_id", ""),
+            sso_cookie=item.get("sso_cookie", ""),
+            sso_rw_cookie=item.get("sso_rw_cookie", ""),
+            access_token=item.get("access_token", ""),
+            refresh_token=item.get("refresh_token", ""),
+            created_at=item.get("created_at") or datetime.now(timezone.utc).isoformat(),
+            status=item.get("status", "active"),
+            extra=item.get("extra") or {}
+        )
+    raise TypeError(f"Expected AccountRecord or dict, got {type(item)}")
+
+
 def load_oauth_accounts(json_path: str = "accounts.json", only_healthy: bool = False) -> List[Dict[str, Any]]:
     """
     Loads and exports all accounts in standard Grok Router OAuth format:
@@ -146,20 +190,8 @@ def load_oauth_accounts(json_path: str = "accounts.json", only_healthy: bool = F
     for acc in raw_accounts:
         if only_healthy and acc.get("status") not in ("active", "healthy", "ok"):
             continue
-        email = acc.get("email", "")
-        # Use access_token if present, else fallback to sso JWT
-        access_token = acc.get("access_token") or acc.get("sso_cookie", "")
-        # Use refresh_token if present, else fallback to sso_rw_cookie or sso_cookie
-        refresh_token = acc.get("refresh_token") or acc.get("sso_rw_cookie") or acc.get("sso_cookie", "")
-        sso_cookie = acc.get("sso_cookie", "")
-        sso_rw_cookie = acc.get("sso_rw_cookie", sso_cookie)
-        oauth_list.append({
-            "email": email,
-            "access_token": access_token,
-            "refresh_token": refresh_token,
-            "sso_cookie": sso_cookie,
-            "sso_rw_cookie": sso_rw_cookie
-        })
+        rec = _to_account_record(acc)
+        oauth_list.append(rec.to_oauth_dict())
     return oauth_list
 
 
@@ -173,4 +205,52 @@ def save_oauth_router_accounts(output_path: str, json_path: str = "accounts.json
         with open(output_path, "w", encoding="utf-8") as f:
             json.dump(oauth_data, f, indent=2, ensure_ascii=False)
     return len(oauth_data)
+
+
+def export_for_router(
+    output_path: Optional[str] = None,
+    json_path: str = "accounts.json",
+    only_healthy: bool = False,
+    accounts: Optional[List[Any]] = None
+) -> List[Dict[str, Any]]:
+    """
+    Exports accounts in standard format for Grok_Router-Mini:
+    [
+      {
+        "id": "...",
+        "name": "...",
+        "email": "...",
+        "ssoToken": "...",
+        "refreshToken": "...",
+        "status": "active",
+        "createdAt": "...",
+        "oauthVerified": True,
+        "oauthScope": "grok-cli:access"
+      }
+    ]
+    If output_path is provided, writes the router node list to that file.
+    Returns the list of router node dicts.
+    """
+    if isinstance(output_path, list):
+        accounts = output_path
+        output_path = None
+
+    if accounts is None:
+        raw_accounts = load_accounts(json_path)
+    else:
+        raw_accounts = accounts
+
+    router_nodes: List[Dict[str, Any]] = []
+    for acc in raw_accounts:
+        rec = _to_account_record(acc)
+        if only_healthy and rec.status not in ("active", "healthy", "ok"):
+            continue
+        router_nodes.append(rec.to_router_node_dict())
+
+    if output_path:
+        with _FILE_LOCK:
+            with open(output_path, "w", encoding="utf-8") as f:
+                json.dump(router_nodes, f, indent=2, ensure_ascii=False)
+
+    return router_nodes
 
