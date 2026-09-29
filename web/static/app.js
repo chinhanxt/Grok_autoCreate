@@ -1102,7 +1102,7 @@ async function deleteSelectedAccounts() {
   loadAccounts();
 }
 
-function exportData(format) {
+function exportData(format = "router") {
   // If user selected specific checkboxes, export selected!
   // Otherwise export all filtered accounts (or all accounts)
   let exportList = [];
@@ -1122,26 +1122,28 @@ function exportData(format) {
   const isSelective = selectedEmails.size > 0;
   const count = exportList.length;
 
-  if (format === "oauth") {
-    // Format into standard Grok Router OAuth format
-    const oauthData = exportList.map(acc => {
-      const accTok = (acc.access_token && acc.access_token.startsWith("eyJ")) 
-        ? acc.access_token 
-        : (acc.sso_cookie || "");
-      const refTok = acc.refresh_token || acc.sso_rw_cookie || acc.sso_cookie || "";
+  if (format === "router" || format === "oauth" || !format) {
+    // Format chuẩn 100% cho Grok_Router-Mini (kéo thả nạp vào aiclaude.freepro.online)
+    const routerNodes = exportList.map((acc, idx) => {
+      const isRealRt = Boolean(acc.refresh_token && !acc.refresh_token.startsWith("sso") && !acc.refresh_token.includes(";"));
+      const accTok = (acc.access_token && acc.access_token.startsWith("eyJ")) ? acc.access_token : "";
       return {
+        id: acc.user_id || `node-${Date.now()}-${idx + 1}`,
+        name: acc.email,
         email: acc.email,
-        access_token: accTok,
-        refresh_token: refTok
+        ssoToken: accTok,
+        refreshToken: isRealRt ? acc.refresh_token : "",
+        status: acc.status || "active",
+        createdAt: acc.created_at || new Date().toISOString()
       };
     });
 
     downloadBlob(
-      JSON.stringify(oauthData, null, 2),
-      isSelective ? `grok_oauth_tokens_selected_${count}.json` : "grok_oauth_tokens.json",
+      JSON.stringify(routerNodes, null, 2),
+      isSelective ? `grok_router_nodes_selected_${count}.json` : "grok_router_nodes.json",
       "application/json"
     );
-    showToast(`Đã xuất ${count} tài khoản (OAuth JSON)`, "success");
+    showToast(`Đã xuất ${count} node chuẩn cho Router!`, "success");
 
   } else if (format === "json") {
     downloadBlob(

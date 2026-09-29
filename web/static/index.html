@@ -256,11 +256,9 @@
               <button class="btn btn-danger btn-xs" id="btnBatchDelete" onclick="deleteSelectedAccounts()">XÓA</button>
             </div>
             <div class="export-btn-group">
-              <button class="btn btn-warning btn-xs" id="btnReviveAccounts" onclick="startReviveDeadAccounts()" title="Làm sống lại toàn bộ tài khoản bằng SSO Cookie / Refresh Token & Cấp lại OAuth">⚡ HỒI SINH</button>
-              <button class="btn btn-ghost btn-xs" id="btnHealthCheck" onclick="runHealthCheckScan()" title="Kiểm tra sức khoẻ toàn bộ tài khoản với grok-4.6">🩺 CHECK PING</button>
-              <button class="btn btn-ghost btn-xs" onclick="exportData('oauth')" title="Xuất 5 trường chuẩn Router">ROUTER</button>
-              <button class="btn btn-ghost btn-xs" onclick="exportData('txt')">TXT</button>
-              <button class="btn btn-ghost btn-xs" onclick="exportData('json')">JSON</button>
+              <button class="btn btn-primary btn-xs" id="btnExportNodes" onclick="exportData('router')" title="Xuất file JSON nạp trực tiếp vào Router (aiclaude.freepro.online)">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" style="display:inline-block; vertical-align:-1px; margin-right:4px;"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>XUẤT
+              </button>
             </div>
           </div>
         </div>
